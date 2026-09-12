@@ -1,10 +1,20 @@
-import { money, summary, KIND, FUNDING } from "./domain.js";
+import {
+  money,
+  summary,
+  KIND,
+  FUNDING,
+  ledgerEntries,
+  dateRange,
+  tripPay,
+} from "./domain.js";
 export function download(blob, name) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = name;
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 export function exportBackup(data) {
   download(
@@ -36,9 +46,16 @@ function rowsFor(entries, profiles) {
       e.reimbursed / 100,
       e.funding === "advance" ? (e.amount - e.reimbursed) / 100 : 0,
       e.note || "",
+      e.end_date || e.date,
+      e.is_trip
+        ? tripPay(e.date, e.end_date || e.date, e.underground_days || 0).days
+        : 0,
+      e.underground_days || 0,
+      e.source_entry_id || e.id,
     ]);
 }
 export async function buildExcel(entries, profiles, title) {
+  entries = ledgerEntries(entries);
   const { default: ExcelJS } = await import("exceljs");
   const wb = new ExcelJS.Workbook();
   wb.creator = "研助表";
@@ -51,13 +68,13 @@ export async function buildExcel(entries, profiles, title) {
       fitToHeight: 0,
     },
   });
-  sheet.mergeCells("A1:J1");
+  sheet.mergeCells("A1:N1");
   sheet.getCell("A1").value = title;
   sheet.getCell("A1").font = { bold: true, size: 18 };
   sheet.getRow(1).height = 34;
   const columns = [
     "成员",
-    "日期",
+    "开始日期 / 记账日期",
     "类型",
     "分类",
     "具体事务",
@@ -66,6 +83,10 @@ export async function buildExcel(entries, profiles, title) {
     "已报销（元）",
     "待报销（元）",
     "备注",
+    "结束日期",
+    "出差天数",
+    "下井天数",
+    "关联事务编号",
   ];
   sheet.addRow(columns);
   rowsFor(entries, profiles).forEach((r) => sheet.addRow(r));
@@ -80,9 +101,13 @@ export async function buildExcel(entries, profiles, title) {
     { width: 17 },
     { width: 17 },
     { width: 40 },
+    { width: 16 },
+    { width: 13 },
+    { width: 13 },
+    { width: 40 },
   ];
   sheet.views = [{ state: "frozen", ySplit: 2 }];
-  sheet.autoFilter = { from: "A2", to: "J2" };
+  sheet.autoFilter = { from: "A2", to: "N2" };
   sheet.getRow(2).eachCell((c) => {
     c.fill = {
       type: "pattern",
@@ -103,12 +128,18 @@ export async function buildExcel(entries, profiles, title) {
   const sums = wb.addWorksheet("成员汇总");
   sums.addRow([
     "成员",
-    "补助与奖励（元）",
+    "工资补助奖金（元）",
     "科研支出（元）",
     "差额（元）",
     "待报销垫付（元）",
     "个人承担（元）",
     "实际净收入（元）",
+    "固定工资（元）",
+    "月度补助（元）",
+    "出差工资（元）",
+    "奖金（元）",
+    "团队已记账支出（元）",
+    "团队费用含待报销（元）",
   ]);
   profiles
     .filter((p) => p.role === "student")
@@ -122,21 +153,68 @@ export async function buildExcel(entries, profiles, title) {
         s.pending / 100,
         s.personal / 100,
         s.net / 100,
+        s.salary / 100,
+        s.allowance / 100,
+        s.trip_salary / 100,
+        s.reward / 100,
+        s.teamOutlay / 100,
+        s.teamCost / 100,
       ]);
     });
   sums.columns.forEach((c) => (c.width = 23));
   sums.getRow(1).font = { bold: true };
   sums.eachRow((r, i) => {
-    if (i > 1) for (let j = 2; j <= 7; j++) r.getCell(j).numFmt = "#,##0.00";
+    if (i > 1) for (let j = 2; j <= 13; j++) r.getCell(j).numFmt = "#,##0.00";
   });
   sums.addRow([]);
   sums.addRow([
-    "差额=补助及奖励-全部科研支出；净收入=补助及奖励-待报销垫付-个人承担。",
+    "差额=工资补助奖金-全部科研支出；净收入=工资补助奖金-待报销垫付-个人承担。",
   ]);
-  sums.addRow(["自动补助为记账记录，不证明款项已汇入银行卡。"]);
+  sums.addRow(["工资和补助为记账记录，不证明款项已汇入银行卡。"]);
+  sums.addRow([
+    "团队已记账支出=工资+补助+出差工资+奖金+课题组直接支付+已报销；团队费用另加待报销垫付，不含学生个人承担。",
+  ]);
+  const items = wb.addWorksheet("费用分项");
+  items.addRow([
+    "成员",
+    "开始日期",
+    "结束日期",
+    "具体事务",
+    "费用名称",
+    "费用分类",
+    "金额（元）",
+    "支付方式",
+    "关联事务编号",
+  ]);
+  for (const e of entries.filter((e) => e.kind === "expense"))
+    for (const item of e.items?.length
+      ? e.items
+      : [{ name: e.description, category: e.category, amount: e.amount }])
+      items.addRow([
+        profiles.find((p) => p.id === e.owner_id)?.name || "",
+        e.date,
+        e.end_date || e.date,
+        e.description,
+        item.name,
+        item.category,
+        item.amount / 100,
+        FUNDING[e.funding],
+        e.id,
+      ]);
+  items.columns = [14, 16, 16, 35, 25, 24, 18, 18, 40].map((width) => ({
+    width,
+  }));
+  items.getRow(1).font = { bold: true };
+  items.views = [{ state: "frozen", ySplit: 1 }];
+  items.autoFilter = { from: "A1", to: "I1" };
+  items.eachRow((r, i) => {
+    if (i > 1) r.getCell(7).numFmt = "#,##0.00";
+    r.eachCell((c) => (c.alignment = { vertical: "middle", wrapText: true }));
+  });
   return wb.xlsx.writeBuffer();
 }
 export async function buildPDF(entries, profiles, title, fontBytes) {
+  entries = ledgerEntries(entries);
   const [{ PDFDocument, rgb }, { default: fontkit }] = await Promise.all([
     import("pdf-lib"),
     import("@pdf-lib/fontkit"),
@@ -208,9 +286,12 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
   for (const e of data) {
     const cols = [
       profiles.find((p) => p.id === e.owner_id)?.name || "",
-      e.date,
+      dateRange(e),
       e.kind === "expense" ? `${KIND[e.kind]}\n${e.category}` : KIND[e.kind],
-      e.description,
+      e.description +
+        (e.items?.length
+          ? "\n" + e.items.map((i) => `${i.name} ${money(i.amount)}`).join("；")
+          : ""),
       money(e.amount).replace("¥", ""),
       e.kind !== "expense"
         ? "研助收入"
@@ -251,7 +332,7 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
   if (y < 120) newPage();
   y -= 14;
   line(
-    `补助与奖励 ${money(s.income)}    科研支出 ${money(s.expense)}    本期差额 ${money(s.gap)}`,
+    `工资补助奖金 ${money(s.income)}    科研支出 ${money(s.expense)}    本期差额 ${money(s.gap)}`,
     32,
     y,
     11,
@@ -265,14 +346,14 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
   );
   y -= 24;
   line(
-    "差额 = 补助及奖励 - 科研支出；净收入 = 补助及奖励 - 待报销垫付 - 个人承担。",
+    "差额 = 工资补助奖金 - 科研支出；净收入 = 工资补助奖金 - 待报销垫付 - 个人承担。",
     32,
     y,
     9,
   );
   y -= 18;
   line(
-    "自动补助为记账记录，不代表银行实际转账。本报表请按学校要求核对、签字。",
+    "工资和补助为记账记录，不代表银行实际转账。本报表请按学校要求核对、签字。",
     32,
     y,
     9,

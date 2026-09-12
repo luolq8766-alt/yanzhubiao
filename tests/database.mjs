@@ -98,7 +98,7 @@ await deny(
 await deny(
   alice,
   "select public.save_entry($1,1,$2)",
-  [{ ...entry, kind: "reward" }, crypto.randomUUID()],
+  [{ ...entry, kind: "allowance" }, crypto.randomUUID()],
   /只能由老师/,
 );
 await deny(
@@ -142,7 +142,8 @@ const task = {
   id: crypto.randomUUID(),
   title: "精读论文",
   content: "整理证据链",
-  reward: "200 元",
+  reward: "精读奖励",
+  reward_amount: 20000,
   category: "文献精读",
   deadline: `${y + 1}-01-01`,
 };
@@ -166,28 +167,185 @@ await deny(bob, "select public.claim_task($1)", [task.id], /已被领取/);
 await deny(bob, "select public.complete_task($1)", [task.id], /仅老师/);
 await as(teacher, "select public.complete_task($1)", [task.id]);
 await deny(alice, "select public.claim_task($1,true)", [task.id], /已完成/);
-await ok("定额重复运行不重发，生成后金额不随设置更改", async () => {
-  await as(teacher, "select public.save_settings($1,$2)", [
-    { team_name: "测试组", monthly_limit: 300000, gap_limit: 1000000 },
-    [{ id: alice, monthly_stipend: 120000 }],
+const nowMonth =
+  new Date()
+    .toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })
+    .slice(0, 7) + "-01";
+const rates = {
+  master_1: 80000,
+  master_2: 100000,
+  master_3: 120000,
+  doctor_1: 150000,
+  doctor_2: 160000,
+  doctor_3: 170000,
+  doctor_4: 180000,
+  doctor_5: 190000,
+};
+await ok("按年级工资生成、重算与月度手动覆盖", async () => {
+  await as(teacher, "select public.save_salary_rules($1,$2,0)", [
+    nowMonth,
+    rates,
   ]);
   await as(teacher, "select public.ensure_allowances()");
   await as(teacher, "select public.ensure_allowances()");
   let r = await as(
     alice,
-    "select * from public.entries where allowance_month is not null",
+    "select * from public.entries where salary_month=$1",
+    [nowMonth],
   );
   assert.equal(r.rows.length, 1);
-  assert.equal(r.rows[0].amount, 120000);
-  await as(teacher, "select public.save_settings($1,$2)", [
-    { team_name: "测试组", monthly_limit: 300000, gap_limit: 1000000 },
-    [{ id: alice, monthly_stipend: 180000 }],
+  assert.equal(r.rows[0].amount, 100000);
+  await as(teacher, "select public.save_salary_rules($1,$2,1)", [
+    nowMonth,
+    { ...rates, master_2: 200000 },
   ]);
-  r = await as(
+  r = await as(alice, "select * from public.entries where salary_month=$1", [
+    nowMonth,
+  ]);
+  assert.equal(r.rows[0].amount, 200000);
+  await as(teacher, "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)", [
     alice,
-    "select * from public.entries where allowance_month is not null",
+    nowMonth,
+    "salary",
+    250000,
+    r.rows[0].version,
+    crypto.randomUUID(),
+  ]);
+  await as(teacher, "select public.save_salary_rules($1,$2,2)", [
+    nowMonth,
+    { ...rates, master_2: 300000 },
+  ]);
+  r = await as(alice, "select * from public.entries where salary_month=$1", [
+    nowMonth,
+  ]);
+  assert.equal(r.rows[0].amount, 250000);
+  assert.equal(r.rows[0].salary_manual, true);
+});
+await ok("老师指定8月补助2000改4000，重试不重复入账", async () => {
+  let r = await as(
+    teacher,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6) e",
+    [alice, `${y}-08-01`, "allowance", 200000, 0, crypto.randomUUID()],
   );
-  assert.equal(r.rows[0].amount, 120000);
+  const first = r.rows[0].e,
+    op = crypto.randomUUID();
+  const args = [alice, `${y}-08-01`, "allowance", 400000, first.version, op];
+  r = await as(
+    teacher,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6) e",
+    args,
+  );
+  assert.equal(r.rows[0].e.id, first.id);
+  assert.equal(r.rows[0].e.amount, 400000);
+  await as(
+    teacher,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)",
+    args,
+  );
+  r = await as(alice, "select * from public.entries where allowance_month=$1", [
+    `${y}-08-01`,
+  ]);
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0].amount, 400000);
+  await deny(
+    teacher,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)",
+    [alice, `${y}-08-01`, "allowance", 500000, 1, crypto.randomUUID()],
+    /CONFLICT/,
+  );
+  await deny(
+    bob,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)",
+    [bob, `${y}-08-01`, "allowance", 1, 0, crypto.randomUUID()],
+    /仅老师/,
+  );
+  await deny(
+    alice,
+    "select public.save_entry($1,2,$2)",
+    [{ ...r.rows[0], amount: 999 }, crypto.randomUUID()],
+    /只能由老师/,
+  );
+});
+await ok("零元、招待费、多项出差费用，服务端重算12天工资", async () => {
+  const trip = {
+    ...entry,
+    id: crypto.randomUUID(),
+    date: `${y}-07-19`,
+    end_date: `${y}-07-30`,
+    is_trip: true,
+    underground_days: 3,
+    trip_wage: 99999999,
+    amount: 260000,
+    items: [
+      { name: "机票", category: "差旅费", amount: 200000 },
+      { name: "住宿", category: "差旅费", amount: 20000 },
+      { name: "餐饮", category: "招待费", amount: 20000 },
+      { name: "打车", category: "差旅费", amount: 20000 },
+    ],
+  };
+  const r = await as(alice, "select public.save_entry($1,0,$2) e", [
+    trip,
+    crypto.randomUUID(),
+  ]);
+  assert.equal(r.rows[0].e.trip_wage, 162000);
+  assert.equal(r.rows[0].e.items.length, 4);
+  assert.equal(r.rows[0].e.category, "多项费用");
+  await deny(
+    alice,
+    "select public.save_entry($1,1,$2)",
+    [{ ...trip, underground_days: 13 }, crypto.randomUUID()],
+    /下井/,
+  );
+  await deny(
+    alice,
+    "select public.save_entry($1,1,$2)",
+    [{ ...trip, amount: 1 }, crypto.randomUUID()],
+    /合计/,
+  );
+  await deny(
+    alice,
+    "select public.save_entry($1,1,$2)",
+    [{ ...trip, end_date: `${y}-07-18` }, crypto.randomUUID()],
+    /日期/,
+  );
+  await deny(alice, "select public.save_entry($1,1,$2)", [
+    { ...trip, underground_days: 1.5 },
+    crypto.randomUUID(),
+  ]);
+  await as(alice, "select public.save_entry($1,0,$2)", [
+    { ...entry, id: crypto.randomUUID(), category: "招待费", amount: 0 },
+    crypto.randomUUID(),
+  ]);
+});
+await ok("学生可自行录入奖金；任务验收仅生成一次奖金", async () => {
+  await as(alice, "select public.save_entry($1,0,$2)", [
+    {
+      ...entry,
+      id: crypto.randomUUID(),
+      kind: "reward",
+      funding: "team",
+      category: "奖金",
+      amount: 50000,
+    },
+    crypto.randomUUID(),
+  ]);
+  await as(teacher, "select public.complete_task($1)", [task.id]);
+  const r = await as(alice, "select * from public.entries where task_id=$1", [
+    task.id,
+  ]);
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0].amount, 20000);
+  await deny(
+    alice,
+    "select public.save_entry($1,1,$2)",
+    [{ ...r.rows[0], amount: 999 }, crypto.randomUUID()],
+    /不能单独修改/,
+  );
+  assert.equal(
+    (await as(bob, "select * from public.entries where task_id=$1", [task.id]))
+      .rows.length,
+    0,
+  );
 });
 await ok("老师能汇总学生记录", async () => {
   assert((await as(teacher, "select * from public.entries")).rows.length >= 2);

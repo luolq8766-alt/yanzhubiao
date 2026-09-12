@@ -1,14 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { seed, validEntry, today } from "../src/domain.js";
+import {
+  seed,
+  validEntry,
+  today,
+  normalizeEntry,
+  salaryFor,
+} from "../src/domain.js";
 // Evaluate the production store with explicit database/network/browser test doubles.
 let source = await readFile(
   new URL("../src/store.js", import.meta.url),
   "utf8",
 );
 source = source
-  .replace(/^import .*;\r?$/gm, "")
+  .replace(/^import[\s\S]*?;\r?$/gm, "")
   .replaceAll("export const ", "const ")
   .replaceAll("import.meta.env.VITE_SUPABASE_URL", "'https://example.invalid'")
   .replaceAll("import.meta.env.VITE_SUPABASE_ANON_KEY", "'test-only'");
@@ -18,6 +24,8 @@ const make = new Function(
   "seed",
   "validEntry",
   "today",
+  "normalizeEntry",
+  "salaryFor",
   "navigator",
   "window",
   "document",
@@ -142,6 +150,8 @@ function harness() {
       seed,
       validEntry,
       today,
+      normalizeEntry,
+      salaryFor,
       nav,
       { addEventListener() {} },
       { addEventListener() {}, hidden: false },

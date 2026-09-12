@@ -2535,3 +2535,205 @@ th {
     max-width: 205px;
   }
 }
+.settings-main {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+.payroll-panel .notice {
+  margin: 16px 0;
+}
+.income-breakdown {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin: -8px 0 24px;
+  padding: 20px 24px;
+  background: #eaf2f2;
+  border-radius: 14px;
+}
+.income-breakdown div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.income-breakdown span {
+  color: #5c747d;
+  font-size: 13px;
+}
+.income-breakdown strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.expense-lines {
+  border: 1px solid #dde7e9;
+  border-radius: 12px;
+  padding: 16px;
+  margin: 12px 0 20px;
+}
+.expense-lines .panel-heading {
+  padding: 0;
+  margin-bottom: 12px;
+}
+.expense-line {
+  display: grid;
+  grid-template-columns: 1.2fr 1.2fr 1fr 30px;
+  gap: 10px;
+  align-items: center;
+}
+.expense-line input,
+.expense-line select {
+  min-width: 0;
+  width: 100%;
+}
+.expense-total {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #e4ebed;
+}
+.trip-box {
+  background: #edf5f2;
+  padding: 16px;
+  border-radius: 12px;
+  margin: 20px 0;
+}
+.trip-box .field {
+  margin-top: 16px;
+  max-width: 240px;
+}
+.checkbox-field {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-weight: 600;
+}
+.checkbox-field input {
+  width: 18px;
+  height: 18px;
+  accent-color: #168c77;
+}
+.entry-items {
+  max-width: 340px;
+  font-size: 12px;
+  line-height: 1.8;
+  margin-top: 7px;
+  color: #59737e;
+}
+.entry-items summary,
+.rate-history summary {
+  cursor: pointer;
+  color: #168c77;
+}
+.rate-history {
+  margin-top: 20px;
+}
+.rate-history button {
+  display: block;
+  margin-top: 12px;
+}
+.heading-actions {
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  .page-heading {
+    flex-direction: column;
+  }
+  .heading-actions {
+    flex-direction: row;
+    width: 100%;
+    align-items: center;
+  }
+  .ledger-table {
+    display: block;
+    width: 100%;
+    min-width: 0 !important;
+  }
+  .ledger-table thead {
+    display: none;
+  }
+  .ledger-table tbody {
+    display: grid;
+    padding: 0 16px;
+  }
+  .ledger-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    padding: 18px 0;
+    border-bottom: 1px solid #e5ecef;
+  }
+  .ledger-table tbody td {
+    display: block;
+    min-width: 0 !important;
+    width: auto !important;
+    padding: 0 !important;
+    border: 0;
+    white-space: normal;
+  }
+  .ledger-table td:nth-child(1),
+  .ledger-table td:nth-child(2),
+  .ledger-table td:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+  .ledger-table td:nth-child(1) strong {
+    font-size: 13px;
+  }
+  .ledger-table td:nth-child(4) {
+    text-align: right;
+    font-size: 16px;
+  }
+  .ledger-table td:nth-child(7) {
+    text-align: right;
+  }
+  .ledger-table .row-actions {
+    justify-content: flex-end;
+  }
+  .ledger-table .note-cell {
+    max-width: none;
+    overflow-wrap: anywhere;
+  }
+  .ledger-table .entry-description {
+    min-width: 0;
+  }
+  .ledger-table .entry-description strong {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .ledger-table .entry-items {
+    max-width: none;
+  }
+  .ledger-table td small {
+    margin-top: 4px;
+  }
+  .income-breakdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 18px;
+  }
+  .expense-line {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
+    border-bottom: 1px solid #dde7e9;
+    padding-top: 12px;
+  }
+  .expense-line .field:first-child {
+    grid-column: 1 / -1;
+    margin-bottom: 0;
+  }
+  .expense-lines {
+    padding: 12px;
+  }
+  .heading-actions {
+    gap: 8px;
+    justify-content: flex-start;
+  }
+  .heading-actions button {
+    padding: 10px 12px;
+  }
+  .trip-box .checkbox-field {
+    font-size: 14px;
+    align-items: flex-start;
+  }
+  .trip-box .checkbox-field input {
+    flex-shrink: 0;
+  }
+}

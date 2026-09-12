@@ -1,6 +1,6 @@
 {
   "name": "yanzhubiao",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "vite build && node scripts/build-sw.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test tests/*.test.mjs",
-    "test:db": "node tests/database.mjs"
+    "test:db": "node tests/database.mjs && node tests/migration.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",

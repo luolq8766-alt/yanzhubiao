@@ -1,7 +1,15 @@
 import { createClient } from "@supabase/supabase-js";
 import { openDB } from "idb";
-import { seed, validEntry, today } from "./domain.js";
-const url = import.meta.env.VITE_SUPABASE_URL,
+import {
+  seed,
+  validEntry,
+  today,
+  normalizeEntry,
+  salaryFor,
+} from "./domain.js";
+const url = import.meta.env.VITE_SUPABASE_URL?.trim()
+    .replace(/\/(rest|auth|storage)\/v1\/?$/, "")
+    .replace(/\/$/, ""),
   key = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export const cloud = Boolean(url && key);
 export const supabase = cloud ? createClient(url, key) : null;
@@ -15,6 +23,7 @@ const empty = () => ({
   entries: [],
   tasks: [],
   claims: [],
+  salaryRules: [],
   settings: {
     team_name: "科研课题组",
     monthly_limit: 300000,
@@ -49,6 +58,7 @@ class Store {
   listeners = new Set();
   write = Promise.resolve();
   account = null;
+  refreshVersion = 0;
   subscribe = (fn) => {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
@@ -131,21 +141,25 @@ class Store {
   }
   async refresh() {
     const account = this.account;
-    const [p, e, t, c, s] = await Promise.all([
+    const revision = ++this.refreshVersion;
+    const [p, e, t, c, s, rules] = await Promise.all([
       supabase.from("profiles").select("*"),
       allEntries(),
       supabase.rpc("list_tasks"),
       supabase.from("task_claims").select("*"),
       supabase.from("team_settings").select("*").maybeSingle(),
+      supabase.from("salary_rules").select("*").order("effective_month"),
     ]);
-    for (const r of [p, e, t, c, s]) if (r.error) throw r.error;
+    for (const r of [p, e, t, c, s, rules]) if (r.error) throw r.error;
     if (account !== this.account) return;
     await this.transaction(async () => {
+      if (account !== this.account || revision !== this.refreshVersion) return;
       const current = this.state.data;
       const ids = new Set(current.queue.map((q) => q.entry.id));
       await this.persist({
         ...current,
         profiles: p.data,
+        salaryRules: rules.data,
         entries: [
           ...e.data.filter((x) => !ids.has(x.id)),
           ...current.queue.map((q) => q.entry),
@@ -213,10 +227,11 @@ class Store {
           "同步未完成：" + (e.message || "网络暂不可用") + "。本机记录已保留。",
       });
     } finally {
-      this.set({ syncing: false });
+      if (account === this.account) this.set({ syncing: false });
     }
   }
   async saveEntry(entry) {
+    entry = normalizeEntry(entry);
     return this.transaction(async () => {
       const data = this.state.data,
         p = data.profiles.find((p) => p.id === entry.owner_id);
@@ -255,6 +270,7 @@ class Store {
   }
   async action(name, args) {
     if (cloud) {
+      if (this.state.syncing) throw new Error("正在同步，请完成后再操作");
       if (!navigator.onLine)
         throw new Error("此操作需要联网确认，请恢复网络后重试");
       const { data, error } = await supabase.rpc(name, args);
@@ -279,18 +295,140 @@ class Store {
           d.claims.push({ task_id: task.id, student_id: this.state.user.id });
         }
       }
-      if (name === "complete_task")
-        d.tasks = d.tasks.map((t) =>
-          t.id === args.p_id ? { ...t, status: "completed" } : t,
-        );
-      if (name === "save_task")
-        d.tasks.unshift({ ...args.p_task, status: "open", taken: false });
-      if (name === "save_settings") {
+      if (name === "complete_task") {
+        const task = d.tasks.find((t) => t.id === args.p_id);
+        const claim = d.claims.find((c) => c.task_id === task.id);
+        if (!claim) throw new Error("任务尚未被领取");
+        if (
+          task.status !== "completed" &&
+          task.reward_amount > 0 &&
+          !d.entries.some((e) => e.task_id === task.id)
+        )
+          d.entries.push({
+            id: crypto.randomUUID(),
+            owner_id: claim.student_id,
+            date: today(),
+            end_date: today(),
+            kind: "reward",
+            category: "任务奖金",
+            description: `任务奖金 · ${task.title}`,
+            amount: task.reward_amount,
+            funding: "team",
+            reimbursed: 0,
+            note: "老师验收后自动记账",
+            version: 1,
+            task_id: task.id,
+            deleted: false,
+          });
+        task.status = "completed";
+      }
+      if (name === "save_task") {
+        const old = d.tasks.find((t) => t.id === args.p_task.id);
+        if (old?.status === "completed") throw new Error("已完成任务不能修改");
+        d.tasks = [
+          {
+            ...old,
+            ...args.p_task,
+            status: "open",
+            taken: old?.taken || false,
+          },
+          ...d.tasks.filter((t) => t.id !== args.p_task.id),
+        ];
+      }
+      if (name === "save_settings")
         d.settings = { ...d.settings, ...args.p_settings };
-        d.profiles = d.profiles.map((p) => ({
-          ...p,
-          ...args.p_stipends.find((s) => s.id === p.id),
-        }));
+      if (name === "save_monthly_payment") {
+        const column =
+          args.p_kind === "salary" ? "salary_month" : "allowance_month";
+        const old = d.entries.find(
+          (e) => e.owner_id === args.p_owner && e[column] === args.p_month,
+        );
+        if ((old?.version || 0) !== args.p_expected_version)
+          throw new Error("CONFLICT:该月份已修改，请重新打开表单");
+        const saved = {
+          ...old,
+          id: old?.id || crypto.randomUUID(),
+          owner_id: args.p_owner,
+          date: args.p_month,
+          end_date: args.p_month,
+          kind: args.p_kind,
+          category: args.p_kind === "salary" ? "固定工资" : "月度补助",
+          description: args.p_kind === "salary" ? "当月固定工资" : "当月补助",
+          amount: args.p_amount,
+          funding: "team",
+          reimbursed: 0,
+          note: "老师按指定年月确认",
+          [column]: args.p_month,
+          salary_manual: args.p_kind === "salary",
+          version: (old?.version || 0) + 1,
+          deleted: false,
+        };
+        d.entries = [...d.entries.filter((e) => e.id !== saved.id), saved];
+      }
+      if (name === "save_salary_rules") {
+        const old = d.salaryRules?.find(
+          (r) => r.effective_month === args.p_month,
+        );
+        if ((old?.version || 0) !== args.p_expected_version)
+          throw new Error("CONFLICT:工资标准已修改");
+        d.salaryRules = [
+          ...(d.salaryRules || []).filter(
+            (r) => r.effective_month !== args.p_month,
+          ),
+          {
+            effective_month: args.p_month,
+            rates: args.p_rates,
+            version: (old?.version || 0) + 1,
+          },
+        ].sort((a, b) => a.effective_month.localeCompare(b.effective_month));
+        for (const p of d.profiles.filter((p) => p.role === "student")) {
+          for (
+            let y = p.start_year;
+            y <= Math.min(p.end_year, Number(today().slice(0, 4)));
+            y++
+          )
+            for (let month = 1; month <= 12; month++) {
+              const m = `${y}-${String(month).padStart(2, "0")}-01`;
+              if (m < p.start_month || m > today() || m < args.p_month)
+                continue;
+              const rule = d.salaryRules
+                .filter((r) => r.effective_month <= m)
+                .at(-1);
+              if (!rule) continue;
+              const amount = salaryFor(p, m, { salary_rates: rule.rates });
+              const existing = d.entries.find(
+                (e) =>
+                  e.owner_id === p.id &&
+                  (e.salary_month === m ||
+                    (e.kind === "salary" &&
+                      e.date === m &&
+                      e.id.startsWith("allow-"))),
+              );
+              if (existing) {
+                if (!existing.salary_manual && !existing.deleted) {
+                  existing.amount = amount;
+                  existing.version++;
+                  existing.salary_month = m;
+                }
+              } else if (amount > 0)
+                d.entries.push({
+                  id: crypto.randomUUID(),
+                  owner_id: p.id,
+                  date: m,
+                  end_date: m,
+                  kind: "salary",
+                  category: "固定工资",
+                  description: "当月固定工资",
+                  amount,
+                  funding: "team",
+                  reimbursed: 0,
+                  note: "按年级标准自动记账",
+                  salary_month: m,
+                  version: 1,
+                  deleted: false,
+                });
+            }
+        }
       }
       await this.persist(d);
     });

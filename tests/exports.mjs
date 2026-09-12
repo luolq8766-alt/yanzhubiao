@@ -12,7 +12,7 @@ const excel = await buildExcel(rows, data.profiles, "研助表 · 月度财务�
 await writeFile(`${target}/report.xlsx`, excel);
 const workbook = new ExcelJS.Workbook();
 await workbook.xlsx.load(excel);
-assert.equal(workbook.worksheets.length, 2);
+assert.equal(workbook.worksheets.length, 3);
 assert.equal(workbook.worksheets[0].rowCount, rows.length + 2);
 assert.equal(workbook.worksheets[0].getCell("F3").type, 2);
 const pdf = await buildPDF(

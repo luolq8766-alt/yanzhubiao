@@ -42,6 +42,7 @@ import {
   Info,
   CloudUpload,
 } from "lucide-react";
+import Payroll from "./Payroll.jsx";
 import { store, cloud, supabase } from "./store.js";
 import {
   CATEGORIES,
@@ -55,6 +56,13 @@ import {
   summary,
   monthly,
   warning,
+  ledgerEntries,
+  categoryTotals,
+  dateRange,
+  tripPay,
+  normalizeEntry,
+  validEntry,
+  salaryFor,
 } from "./domain.js";
 import { exportExcel, exportPDF, exportBackup } from "./exports.js";
 const nav = [
@@ -100,7 +108,11 @@ function Field({ label, children, full = false }) {
   return (
     <label className={`field ${full ? "full" : ""}`}>
       <span>{label}</span>
-      {children}
+      {React.isValidElement(children) && typeof label === "string"
+        ? React.cloneElement(children, {
+            "aria-label": children.props["aria-label"] || label,
+          })
+        : children}
     </label>
   );
 }
@@ -222,11 +234,8 @@ function Trend({ entries, year, owner }) {
   );
 }
 function Donut({ entries }) {
-  const values = CATEGORIES.map((c) =>
-    entries
-      .filter((e) => !e.deleted && e.kind === "expense" && e.category === c)
-      .reduce((a, e) => a + e.amount, 0),
-  );
+  const byCategory = categoryTotals(entries);
+  const values = CATEGORIES.map((c) => byCategory[c]);
   const total = values.reduce((a, b) => a + b, 0);
   let offset = 0;
   return (
@@ -503,7 +512,7 @@ export default function App() {
   const members = state.data.profiles.filter(
     (p) => p.role === "student" && (teacher || p.id === profile?.id),
   );
-  const entries = state.data.entries.filter(
+  const entries = ledgerEntries(state.data.entries).filter(
     (e) => !e.deleted && (teacher || e.owner_id === profile?.id),
   );
   const selectedOwner = teacher ? owner : profile?.id;
@@ -528,6 +537,7 @@ export default function App() {
         e.description,
         e.category,
         e.note,
+        ...(e.items || []).map((i) => i.name),
         members.find((p) => p.id === e.owner_id)?.name,
       ].some((v) => v?.toLowerCase().includes(query.toLowerCase())),
     )
@@ -550,7 +560,12 @@ export default function App() {
       summary(entries, { owner: p.id }),
       state.data.settings,
     );
-  const alertMembers = members.filter((p) => memberWarning(p) !== "green");
+  const overviewMembers = members.filter(
+    (p) => !selectedOwner || p.id === selectedOwner,
+  );
+  const alertMembers = overviewMembers.filter(
+    (p) => memberWarning(p) !== "green",
+  );
   async function run(fn, success) {
     if (busy) return;
     setBusy(true);
@@ -738,9 +753,11 @@ export default function App() {
                     ? "离线可记账"
                     : state.syncing
                       ? "同步中"
-                      : state.data.queue.length
-                        ? `${state.data.queue.length} 笔待同步`
-                        : "云端已连接"}
+                      : state.error
+                        ? "同步异常"
+                        : state.data.queue.length
+                          ? `${state.data.queue.length} 笔待同步`
+                          : "云端已连接"}
               </span>
             </button>
             <span className="top-divider" />
@@ -840,11 +857,28 @@ export default function App() {
                 <>
                   <button
                     className="secondary"
-                    onClick={() => setModal({ type: "export" })}
+                    disabled={busy}
+                    onClick={() => exportReport("excel")}
                   >
                     <Download size={17} />
-                    导出报表
+                    导出 Excel
                   </button>
+                  <button
+                    className="icon-btn"
+                    title="PDF 与其他导出"
+                    aria-label="PDF 与其他导出"
+                    onClick={() => setModal({ type: "export" })}
+                  >
+                    <FileText size={19} />
+                  </button>
+                  {teacher && (
+                    <button
+                      className="secondary"
+                      onClick={() => setView("settings")}
+                    >
+                      工资 / 补助
+                    </button>
+                  )}
                   <button className="primary" onClick={newEntry}>
                     <Plus size={18} />
                     记一笔
@@ -913,16 +947,22 @@ export default function App() {
             <>
               <div className="stats-grid">
                 <Stat
-                  label={month ? "本月科研支出" : "本年科研支出"}
-                  value={total.expense}
-                  caption={`${periodEntries.filter((e) => e.kind === "expense").length} 笔费用 · 按实际记录统计`}
+                  label={teacher ? "团队已记账支出" : "本期科研费用"}
+                  value={teacher ? total.teamOutlay : total.expense}
+                  caption={
+                    teacher
+                      ? `含待报销款的团队费用 ${money(total.teamCost)}`
+                      : `${periodEntries.filter((e) => e.kind === "expense").length} 笔费用 · 不含工资`
+                  }
                   icon={Wallet}
                   accent
                 />
                 <Stat
-                  label={month ? "本月研助与奖励" : "本年研助与奖励"}
+                  label={
+                    month ? "本月工资、补助与奖金" : "本年工资、补助与奖金"
+                  }
                   value={total.income}
-                  caption="定额补助 + 已记账任务奖励"
+                  caption="固定工资 + 月度补助 + 出差工资 + 奖金"
                   icon={Coins}
                 />
                 <Stat
@@ -936,12 +976,25 @@ export default function App() {
                   value={teacher ? total.gap : total.net}
                   caption={
                     teacher
-                      ? "研助与奖励 − 全部科研支出"
-                      : "研助与奖励 − 待报销 − 个人承担"
+                      ? "工资、补助与奖金 − 全部科研支出"
+                      : "工资、补助与奖金 − 待报销 − 个人承担"
                   }
                   icon={ChartNoAxesCombined}
                   negative={(teacher ? total.gap : total.net) < 0}
                 />
+              </div>
+              <div className="income-breakdown">
+                {[
+                  ["固定工资", total.salary],
+                  ["月度补助", total.allowance],
+                  ["出差工资", total.trip_salary],
+                  ["奖金", total.reward],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <strong>{money(value)}</strong>
+                  </div>
+                ))}
               </div>
               <div className="chart-grid">
                 <section className="panel trend-panel">
@@ -960,7 +1013,7 @@ export default function App() {
                       </span>
                       <span>
                         <i />
-                        研助与奖励
+                        工资、补助与奖金
                       </span>
                     </div>
                   </div>
@@ -983,7 +1036,9 @@ export default function App() {
                     <div>
                       <h2>
                         成员经费一览{" "}
-                        <span className="count-bubble">{members.length}</span>
+                        <span className="count-bubble">
+                          {overviewMembers.length}
+                        </span>
                       </h2>
                       <p>关注每位伙伴的支出与垫付情况</p>
                     </div>
@@ -1009,7 +1064,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {members.map((p) => {
+                        {overviewMembers.map((p) => {
                           const s = summary(entries, {
                               owner: p.id,
                               year,
@@ -1143,7 +1198,7 @@ export default function App() {
                   {teacher
                     ? "成员财务仅对本人和老师可见。"
                     : "其他学生无法看到你的财务记录。"}
-                  自动补助是记账记录，不代表银行转账。
+                  工资与补助是记账记录，不代表银行转账。
                 </span>
               </div>
             </>
@@ -1203,7 +1258,7 @@ export default function App() {
                       {visibleEntries.map((e) => (
                         <tr key={e.id}>
                           <td>
-                            <strong className="numeric">{e.date}</strong>
+                            <strong className="numeric">{dateRange(e)}</strong>
                             <small>
                               {members.find((p) => p.id === e.owner_id)?.name}
                             </small>
@@ -1221,6 +1276,19 @@ export default function App() {
                               </span>
                               <div>
                                 <strong>{e.description}</strong>
+                                {!!e.items?.length && (
+                                  <details className="entry-items">
+                                    <summary>
+                                      {e.items.length} 项费用明细
+                                    </summary>
+                                    {e.items.map((item, i) => (
+                                      <div key={i}>
+                                        {item.name} · {item.category}{" "}
+                                        <b>{money(item.amount)}</b>
+                                      </div>
+                                    ))}
+                                  </details>
+                                )}
                                 <small>
                                   {KIND[e.kind]}
                                   {state.data.queue.some(
@@ -1255,9 +1323,11 @@ export default function App() {
                                         : "positive"
                                     }
                                   >
-                                    {e.reimbursed >= e.amount
-                                      ? "已报销"
-                                      : `待报销 ${money(e.amount - e.reimbursed)}`}
+                                    {e.amount === 0
+                                      ? "零元，无需报销"
+                                      : e.reimbursed >= e.amount
+                                        ? "已报销"
+                                        : `待报销 ${money(e.amount - e.reimbursed)}`}
                                   </small>
                                 )}
                               </>
@@ -1267,10 +1337,11 @@ export default function App() {
                           </td>
                           <td className="note-cell">{e.note || "—"}</td>
                           <td>
-                            {!e.allowance_month &&
-                            !e.id.startsWith("allow-") &&
+                            {!e.source_entry_id &&
+                            !e.task_id &&
                             (teacher ||
-                              (e.kind === "expense" && !e.reimbursed)) ? (
+                              ((e.kind === "expense" || e.kind === "reward") &&
+                                !e.reimbursed)) ? (
                               <div className="row-actions">
                                 <button
                                   className="icon-btn"
@@ -1293,7 +1364,11 @@ export default function App() {
                               </div>
                             ) : (
                               <span className="muted small-text">
-                                {e.kind === "allowance" ? "定额生成" : "已锁定"}
+                                {e.source_entry_id
+                                  ? "随出差事务联动"
+                                  : e.task_id
+                                    ? "任务自动记账"
+                                    : "老师维护"}
                               </span>
                             )}
                           </td>
@@ -1313,7 +1388,7 @@ export default function App() {
                   <span>
                     共 {visibleEntries.length} 笔{query ? "匹配记录" : ""}
                   </span>
-                  <span>差额 = 研助与奖励 − 全部科研支出</span>
+                  <span>差额 = 工资、补助与奖金 − 全部科研支出</span>
                 </div>
               </section>
             </>
@@ -1322,7 +1397,7 @@ export default function App() {
             <>
               <div className="stats-grid">
                 <Stat
-                  label="累计研助与奖励"
+                  label="累计工资、补助与奖金"
                   value={all.income}
                   caption="全部培养年度的已记账补助"
                   icon={Coins}
@@ -1381,7 +1456,7 @@ export default function App() {
                   </div>
                   <div className="calculation">
                     <div>
-                      <span>累计研助与奖励</span>
+                      <span>累计工资、补助与奖金</span>
                       <b>{money(all.income)}</b>
                     </div>
                     <div>
@@ -1413,7 +1488,7 @@ export default function App() {
                           "%"
                         : "—"}
                     </strong>
-                    <span>年度科研支出 / 研助与奖励</span>
+                    <span>年度科研支出 / 工资、补助与奖金</span>
                   </div>
                   <p className="muted">
                     此比例用于观察经费结构，不等同于科研成果的投入产出比。
@@ -1508,12 +1583,23 @@ export default function App() {
                         <div>
                           <small>完成奖励</small>
                           <strong>{t.reward}</strong>
+                          <b className="positive">
+                            悬赏奖金 {money(t.reward_amount || 0)}
+                          </b>
                         </div>
                       </div>
                       <div className="task-deadline">
                         <Clock size={15} />
                         截止 {t.deadline}
                       </div>
+                      {teacher && t.status !== "completed" && (
+                        <button
+                          className="text-button"
+                          onClick={() => setModal({ type: "task", task: t })}
+                        >
+                          编辑任务 / 奖金
+                        </button>
+                      )}
                       <div className="task-footer">
                         {teacher ? (
                           <>
@@ -1532,7 +1618,7 @@ export default function App() {
                                       store.action("complete_task", {
                                         p_id: t.id,
                                       }),
-                                    "任务已验收；现金奖励请在财务报表中另行记账。",
+                                    "任务已验收，悬赏奖金已自动计入学生账单。",
                                   )
                                 }
                               >
@@ -1680,6 +1766,7 @@ export default function App() {
       )}
       {modal?.type === "task" && (
         <TaskForm
+          task={modal.task}
           busy={busy}
           onClose={() => setModal(null)}
           onSubmit={(task) =>
@@ -1854,18 +1941,53 @@ function EntryForm({
   onClose,
   onSubmit,
 }) {
-  const [kind, setKind] = useState(entry?.kind || "expense"),
-    [funding, setFunding] = useState(entry?.funding || "advance"),
-    [error, setError] = useState("");
-  const [selected, setSelected] = useState(entry?.owner_id || owner);
-  const person = members.find((p) => p.id === selected),
-    ys = years(person);
-  let date = today();
+  let initial = today();
   if (
-    Number(date.slice(0, 4)) !== year ||
-    (month && Number(date.slice(5, 7)) !== month)
+    Number(initial.slice(0, 4)) !== year ||
+    (month && Number(initial.slice(5, 7)) !== month)
   )
-    date = `${year}-${String(month || 1).padStart(2, "0")}-01`;
+    initial = `${year}-${String(month || 1).padStart(2, "0")}-01`;
+  const [kind, setKind] = useState(entry?.kind || "expense"),
+    [selected, setSelected] = useState(entry?.owner_id || owner),
+    [funding, setFunding] = useState(entry?.funding || "advance");
+  const [start, setStart] = useState(entry?.date || initial),
+    [end, setEnd] = useState(entry?.end_date || entry?.date || initial),
+    [trip, setTrip] = useState(entry?.is_trip || false),
+    [underground, setUnderground] = useState(
+      String(entry?.underground_days || 0),
+    ),
+    [error, setError] = useState("");
+  const [lines, setLines] = useState(() =>
+    (entry?.items?.length
+      ? entry.items
+      : [
+          {
+            name: entry?.description || "",
+            category: entry?.category || "差旅费",
+            amount: entry?.amount || 0,
+          },
+        ]
+    ).map((i) => ({
+      ...i,
+      value: String(i.amount / 100),
+      key: crypto.randomUUID(),
+    })),
+  );
+  const person = members.find((p) => p.id === selected),
+    ys = years(person),
+    lockedMonth = !!(entry?.salary_month || entry?.allowance_month);
+  const updateLine = (key, patch) =>
+    setLines(lines.map((i) => (i.key === key ? { ...i, ...patch } : i)));
+  let pay = null,
+    payError = "",
+    totalAmount = 0;
+  try {
+    totalAmount = lines.reduce((n, i) => n + cents(i.value || "0"), 0);
+    if (trip && kind === "expense")
+      pay = tripPay(start, end, Number(underground));
+  } catch (e) {
+    payError = e.message;
+  }
   return (
     <Modal
       title={entry ? "编辑财务记录" : "记下一笔科研投入"}
@@ -1877,15 +1999,30 @@ function EntryForm({
           e.preventDefault();
           try {
             const f = new FormData(e.currentTarget);
-            onSubmit({
+            const items =
+              kind === "expense"
+                ? lines.map((i) => ({
+                    name:
+                      i.name.trim() ||
+                      (lines.length === 1 ? f.get("description").trim() : ""),
+                    category: i.category,
+                    amount: cents(i.value),
+                  }))
+                : [];
+            const value = normalizeEntry({
               ...entry,
               id: entry?.id || crypto.randomUUID(),
               owner_id: selected,
-              date: f.get("date"),
+              date: start,
+              end_date: kind === "expense" ? end : start,
               kind,
-              category: kind === "expense" ? f.get("category") : KIND[kind],
+              category:
+                kind === "expense" ? items[0]?.category || "其他" : KIND[kind],
               description: f.get("description").trim(),
-              amount: cents(f.get("amount")),
+              amount:
+                kind === "expense"
+                  ? items.reduce((n, i) => n + i.amount, 0)
+                  : cents(f.get("amount")),
               funding: kind === "expense" ? funding : "team",
               reimbursed:
                 kind === "expense" && funding === "advance"
@@ -1893,7 +2030,12 @@ function EntryForm({
                   : 0,
               note: f.get("note").trim(),
               deleted: false,
+              items,
+              is_trip: kind === "expense" && trip,
+              underground_days: trip ? Number(underground) : 0,
             });
+            validEntry(value, person);
+            onSubmit(value);
           } catch (e) {
             setError(e.message);
           }
@@ -1916,63 +2058,190 @@ function EntryForm({
           <Field label="记录类型">
             <select
               value={kind}
+              disabled={lockedMonth}
               onChange={(e) => setKind(e.target.value)}
-              disabled={!teacher}
             >
-              <option value="expense">科研支出</option>
-              {teacher && (
-                <>
-                  <option value="allowance">额外研助补助</option>
-                  <option value="reward">任务奖励</option>
-                </>
+              <option value="expense">科研支出 / 出差事务</option>
+              <option value="reward">奖金（自行录入）</option>
+              {teacher && <option value="allowance">额外补助</option>}
+              {entry?.kind === "salary" && (
+                <option value="salary">固定工资</option>
               )}
             </select>
           </Field>
-          <Field label="日期">
+          <Field
+            label={kind === "expense" ? "开始日期（所属报表月份）" : "记账日期"}
+          >
             <input
-              name="date"
               type="date"
-              defaultValue={entry?.date || date}
+              value={start}
+              disabled={lockedMonth}
               min={`${ys[0]}-01-01`}
               max={`${ys.at(-1)}-12-31`}
               required
+              onChange={(e) => {
+                setStart(e.target.value);
+                if (end < e.target.value) setEnd(e.target.value);
+              }}
             />
           </Field>
-          <Field label="金额 / 元">
-            <input
-              name="amount"
-              type="number"
-              inputMode="decimal"
-              min="0.01"
-              max="100000000"
-              step="0.01"
-              defaultValue={entry ? entry.amount / 100 : ""}
-              placeholder="0.00"
-              required
-            />
-          </Field>
+          {kind === "expense" ? (
+            <Field label="结束日期（含当天）">
+              <input
+                type="date"
+                value={end}
+                min={start}
+                max={`${ys.at(-1)}-12-31`}
+                required
+                onChange={(e) => setEnd(e.target.value)}
+              />
+            </Field>
+          ) : (
+            <Field label="金额 / 元">
+              <input
+                name="amount"
+                type="number"
+                inputMode="decimal"
+                required
+                min="0"
+                max="100000000"
+                step="0.01"
+                defaultValue={entry ? entry.amount / 100 : ""}
+              />
+            </Field>
+          )}
           <Field label="具体事务" full>
             <input
               name="description"
-              defaultValue={entry?.description || ""}
-              placeholder="如：野外采样往返交通、论文版面费"
-              maxLength={200}
               required
+              maxLength={200}
+              defaultValue={entry?.description || ""}
+              placeholder="例如：徐州矿区出差、实验测试、科研奖金"
             />
           </Field>
-          {kind === "expense" && (
-            <>
-              <Field label="费用分类">
-                <select
-                  name="category"
-                  defaultValue={entry?.category || CATEGORIES[0]}
+        </div>
+        {kind === "expense" && (
+          <>
+            <div className="expense-lines">
+              <div className="panel-heading">
+                <h3>费用明细</h3>
+                <button
+                  className="text-button"
+                  type="button"
+                  disabled={lines.length >= 50}
+                  onClick={() =>
+                    setLines([
+                      ...lines,
+                      {
+                        key: crypto.randomUUID(),
+                        name: "",
+                        category: "差旅费",
+                        value: "0",
+                      },
+                    ])
+                  }
                 >
-                  {CATEGORIES.map((c) => (
-                    <option key={c}>{c}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="费用由谁承担">
+                  <Plus size={16} />
+                  添加一项
+                </button>
+              </div>
+              {lines.map((item, i) => (
+                <div className="expense-line" key={item.key}>
+                  <Field label={`第 ${i + 1} 项 · 名称`}>
+                    <input
+                      aria-label={`费用${i + 1}名称`}
+                      value={item.name}
+                      maxLength={80}
+                      required={lines.length > 1}
+                      placeholder="机票 / 住宿 / 餐饮 / 打车"
+                      onChange={(e) =>
+                        updateLine(item.key, { name: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field label="费用分类">
+                    <select
+                      aria-label={`费用${i + 1}分类`}
+                      value={item.category}
+                      onChange={(e) =>
+                        updateLine(item.key, { category: e.target.value })
+                      }
+                    >
+                      {CATEGORIES.map((c) => (
+                        <option key={c}>{c}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="金额 / 元">
+                    <input
+                      aria-label={`费用${i + 1}金额`}
+                      type="number"
+                      inputMode="decimal"
+                      min="0"
+                      max="100000000"
+                      step="0.01"
+                      required
+                      value={item.value}
+                      onChange={(e) =>
+                        updateLine(item.key, { value: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    disabled={lines.length === 1}
+                    aria-label={`移除费用${i + 1}`}
+                    onClick={() =>
+                      setLines(lines.filter((v) => v.key !== item.key))
+                    }
+                  >
+                    <Trash2 size={17} />
+                  </button>
+                </div>
+              ))}
+              <div className="expense-total">
+                费用合计 <strong>{money(totalAmount)}</strong>
+              </div>
+            </div>
+            <div className="trip-box">
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={trip}
+                  onChange={(e) => setTrip(e.target.checked)}
+                />
+                这是出差事务，自动计算出差工资
+              </label>
+              {trip && (
+                <>
+                  <Field label="下井天数（学生填写）">
+                    <input
+                      type="number"
+                      min="0"
+                      max={pay?.days}
+                      step="1"
+                      required
+                      value={underground}
+                      onChange={(e) => setUnderground(e.target.value)}
+                    />
+                  </Field>
+                  {pay ? (
+                    <p>
+                      {pay.days} 天 × 120 元 + 下井 {pay.underground} 天 × 60 元
+                      = <strong>{money(pay.amount)}</strong>
+                    </p>
+                  ) : (
+                    <p className="negative">{payError}</p>
+                  )}
+                  <p className="small-text muted">
+                    出发、返回当天都计入。出差工资单独计入收入，费用合计不包含工资。
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="form-grid">
+              <Field label="本次费用由谁承担">
                 <select
                   value={funding}
                   onChange={(e) => setFunding(e.target.value)}
@@ -1985,36 +2254,33 @@ function EntryForm({
                 </select>
               </Field>
               {funding === "advance" && (
-                <Field
-                  label={
-                    teacher
-                      ? "已报销金额 / 元（老师确认）"
-                      : "已报销金额 / 元（由老师确认）"
-                  }
-                  full
-                >
+                <Field label="已报销金额 / 元（老师确认）">
                   <input
                     name="reimbursed"
                     type="number"
                     min="0"
+                    max={totalAmount / 100}
                     step="0.01"
                     defaultValue={(entry?.reimbursed || 0) / 100}
                     readOnly={!teacher}
                   />
                 </Field>
               )}
-            </>
-          )}
-          <Field label="备注" full>
-            <textarea
-              name="note"
-              maxLength={1000}
-              rows="3"
-              defaultValue={entry?.note || ""}
-              placeholder="项目名称、发票号、出差事由等"
-            />
-          </Field>
-        </div>
+            </div>
+            <p className="subtle-note">
+              一笔事务的费用采用相同支付方式；不同支付方式可分笔记录。跨月事务的全部费用和出差工资计入开始日期所在月。
+            </p>
+          </>
+        )}
+        <Field label="备注" full>
+          <textarea
+            name="note"
+            maxLength={1000}
+            rows="3"
+            defaultValue={entry?.note || ""}
+            placeholder="项目、发票、奖金来源等"
+          />
+        </Field>
         {error && (
           <p className="negative" role="alert">
             {error}
@@ -2022,14 +2288,13 @@ function EntryForm({
         )}
         <div className="subtle-note">
           <CloudUpload size={17} />
-          离线录入会先保存到本机；恢复网络且应用打开时自动同步。
+          离线先保存到本机；联网且应用打开时自动同步。
         </div>
         <div className="dialog-actions">
-          <button className="secondary" type="button" onClick={onClose}>
+          <button type="button" className="secondary" onClick={onClose}>
             取消
           </button>
           <button className="primary" disabled={busy}>
-            <Check size={17} />
             {busy ? "保存中…" : "保存记录"}
           </button>
         </div>
@@ -2037,21 +2302,27 @@ function EntryForm({
     </Modal>
   );
 }
-function TaskForm({ busy, onClose, onSubmit }) {
+function TaskForm({ task, busy, onClose, onSubmit }) {
+  const [error, setError] = useState("");
   return (
-    <Modal title="发布新的学习任务" onClose={onClose}>
+    <Modal title={task ? "编辑学习任务" : "发布新的学习任务"} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          const f = new FormData(e.currentTarget);
-          onSubmit({
-            id: crypto.randomUUID(),
-            title: f.get("title").trim(),
-            content: f.get("content").trim(),
-            reward: f.get("reward").trim(),
-            category: f.get("category"),
-            deadline: f.get("deadline"),
-          });
+          try {
+            const f = new FormData(e.currentTarget);
+            onSubmit({
+              id: task?.id || crypto.randomUUID(),
+              title: f.get("title").trim(),
+              content: f.get("content").trim(),
+              reward: f.get("reward").trim(),
+              reward_amount: cents(f.get("reward_amount")),
+              category: f.get("category"),
+              deadline: f.get("deadline"),
+            });
+          } catch (e) {
+            setError(e.message);
+          }
         }}
       >
         <Field label="任务名称">
@@ -2059,51 +2330,76 @@ function TaskForm({ busy, onClose, onSubmit }) {
             name="title"
             required
             maxLength={120}
-            placeholder="如：复现一篇论文的核心实验"
+            defaultValue={task?.title || ""}
           />
         </Field>
         <Field label="学习内容与交付要求">
-          <textarea name="content" required maxLength={4000} rows="4" />
+          <textarea
+            name="content"
+            required
+            rows="4"
+            maxLength={4000}
+            defaultValue={task?.content || ""}
+          />
         </Field>
-        <Field label="完成奖励">
+        <Field label="奖励说明">
           <textarea
             name="reward"
             required
             maxLength={500}
             rows="2"
-            placeholder="如：300 元学习奖励 + 组会分享机会"
+            defaultValue={task?.reward || ""}
+            placeholder="非现金奖励、验收要求等"
+          />
+        </Field>
+        <Field label="悬赏奖金 / 元（验收后自动记账）">
+          <input
+            name="reward_amount"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            max="100000000"
+            step="0.01"
+            required
+            defaultValue={(task?.reward_amount || 0) / 100}
           />
         </Field>
         <div className="form-grid">
           <Field label="任务分类">
-            <select name="category">
-              <option>文献精读</option>
-              <option>技能提升</option>
-              <option>团队共建</option>
-              <option>研究实践</option>
+            <select name="category" defaultValue={task?.category || "文献精读"}>
+              {["文献精读", "技能提升", "团队共建", "研究实践"].map((c) => (
+                <option key={c}>{c}</option>
+              ))}
             </select>
           </Field>
           <Field label="领取截止日期">
-            <input type="date" name="deadline" min={today()} required />
+            <input
+              name="deadline"
+              type="date"
+              min={task ? undefined : today()}
+              required
+              defaultValue={task?.deadline || ""}
+            />
           </Field>
         </div>
         <p className="subtle-note">
-          每项任务限 1
-          人领取。领取身份仅老师与本人可见，奖励完成后由老师单独记账。
+          老师验收后，以上奖金自动记入领取学生账单；重复验收不会重复记账。金额为
+          0 时不生成现金奖金。旧任务请先核对是否已手动发放，避免重复。
         </p>
+        {error && <p className="negative">{error}</p>}
         <div className="dialog-actions">
           <button type="button" className="secondary" onClick={onClose}>
             取消
           </button>
           <button className="primary" disabled={busy}>
-            发布任务
-            <ArrowRight size={17} />
+            保存任务
           </button>
         </div>
       </form>
     </Modal>
   );
 }
+
 function Settings({
   profile,
   members,
@@ -2117,114 +2413,71 @@ function Settings({
   return (
     <div className="settings-grid">
       {teacher ? (
-        <section className="panel settings-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>团队预算与定额补助</h2>
-              <p>金额单位：人民币元</p>
+        <div className="settings-main">
+          <Payroll members={members} data={data} run={run} busy={busy} />
+          <section className="panel settings-panel">
+            <div className="panel-heading">
+              <h2>团队名称与预算提醒</h2>
             </div>
-            <Settings2 size={21} />
-          </div>
-          <form
-            key={
-              JSON.stringify(data.settings) +
-              members.map((p) => p.monthly_stipend).join(",")
-            }
-            onSubmit={(e) => {
-              e.preventDefault();
-              const f = new FormData(e.currentTarget);
-              run(
-                async () => {
-                  await store.action("save_settings", {
-                    p_settings: {
-                      team_name: f.get("team_name"),
-                      monthly_limit: cents(f.get("monthly_limit")),
-                      gap_limit: cents(f.get("gap_limit")),
-                    },
-                    p_stipends: members.map((p) => ({
-                      id: p.id,
-                      monthly_stipend: cents(f.get(p.id)),
-                    })),
-                  });
-                },
-                cloud
-                  ? "设置已保存。已生成月份保持原金额，未生成月份使用新标准。"
-                  : "演示设置已保存；云端模式会自动生成定额记录。",
-              );
-            }}
-          >
-            <Field label="课题组名称">
-              <input
-                name="team_name"
-                defaultValue={data.settings.team_name}
-                required
-                maxLength={60}
-              />
-            </Field>
-            <div className="form-grid">
-              <Field label="每人单月支出预警阈值 / 元">
+            <form
+              key={JSON.stringify(data.settings)}
+              onSubmit={(e) => {
+                e.preventDefault();
+                const f = new FormData(e.currentTarget);
+                run(
+                  () =>
+                    store.action("save_settings", {
+                      p_settings: {
+                        team_name: f.get("team_name").trim(),
+                        monthly_limit: cents(f.get("monthly_limit")),
+                        gap_limit: cents(f.get("gap_limit")),
+                      },
+                      p_stipends: [],
+                    }),
+                  "团队设置已保存",
+                );
+              }}
+            >
+              <Field label="课题组名称">
                 <input
-                  name="monthly_limit"
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  defaultValue={data.settings.monthly_limit / 100}
+                  name="team_name"
                   required
+                  maxLength={60}
+                  defaultValue={data.settings.team_name}
                 />
               </Field>
-              <Field label="累计负差额预警阈值 / 元">
-                <input
-                  name="gap_limit"
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  defaultValue={data.settings.gap_limit / 100}
-                  required
-                />
-              </Field>
-            </div>
-            <p className="subtle-note">
-              达到阈值 80%
-              显示黄色；达到或超出阈值显示红色。差额预警仅针对负差额。
-            </p>
-            <h3 className="section-label">每月研助补助</h3>
-            {members.map((p) => (
-              <div className="stipend-row" key={p.id}>
-                <div className="person-cell">
-                  <Avatar p={p} />
-                  <div>
-                    <strong>{p.name}</strong>
-                    <small>{degree(p)}</small>
-                  </div>
-                </div>
-                <label>
-                  <span className="sr-only">{p.name}每月补助</span>
+              <div className="form-grid">
+                <Field label="每人单月科研费用预警 / 元">
                   <input
-                    name={p.id}
-                    aria-label={`${p.name}每月补助`}
+                    name="monthly_limit"
                     type="number"
-                    min="0"
+                    min="0.01"
                     step="0.01"
                     required
-                    defaultValue={p.monthly_stipend / 100}
+                    defaultValue={data.settings.monthly_limit / 100}
                   />
-                  <span>元 / 月</span>
-                </label>
+                </Field>
+                <Field label="累计负差额预警 / 元">
+                  <input
+                    name="gap_limit"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    required
+                    defaultValue={data.settings.gap_limit / 100}
+                  />
+                </Field>
               </div>
-            ))}
-            <div className="notice">
-              <Info size={19} />
-              <span>
-                每月 1
-                号自动记账，不执行银行转账。首次设定会补齐入组记账起始月以来缺失的月份；调整金额后，已生成月份不变。
-              </span>
-            </div>
-            <button className="primary" disabled={busy}>
-              <Check size={17} />
-              保存团队设置
-            </button>
-          </form>
-        </section>
+              <p className="subtle-note">
+                达到 80% 黄色提醒，达到 100%
+                红色提醒。科研费用阈值不包含工资、补助和奖金。
+              </p>
+              <button className="primary" disabled={busy}>
+                保存团队设置
+              </button>
+            </form>
+          </section>
+        </div>
       ) : (
         <section className="panel settings-panel">
           <div className="panel-heading">
@@ -2242,8 +2495,22 @@ function Settings({
               <b>{years(profile).join("、")}</b>
             </div>
             <div>
-              <span>每月定额研助</span>
-              <b>{money(profile.monthly_stipend)}</b>
+              <span>本月年级工资标准</span>
+              <b>
+                {money(
+                  salaryFor(profile, today(), {
+                    salary_rates:
+                      [...(data.salaryRules || [])]
+                        .filter((r) => r.effective_month <= today())
+                        .sort((a, b) =>
+                          a.effective_month.localeCompare(b.effective_month),
+                        )
+                        .at(-1)?.rates ||
+                      data.settings.salary_rates ||
+                      {},
+                  }),
+                )}
+              </b>
             </div>
             <div>
               <span>记账起始月份</span>
@@ -2304,7 +2571,7 @@ function Settings({
           <img src="./icon.svg" alt="" />
           <div>
             <h3>研助表</h3>
-            <p>版本 1.0.0 · {cloud ? "云端团队版" : "本机演示版"}</p>
+            <p>版本 2.0.0 · {cloud ? "云端团队版" : "本机演示版"}</p>
           </div>
         </section>
       </div>
