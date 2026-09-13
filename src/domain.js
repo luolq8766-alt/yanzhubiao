@@ -23,11 +23,17 @@ export const KIND = {
   reward: "奖金",
   trip_salary: "出差工资",
 };
-export const FUNDING = {
-  advance: "个人垫付",
-  personal: "个人承担",
-  team: "课题组支付",
-};
+export const BOOK_START = "2026-06-01";
+export const isIncome = (e) => e.kind === "allowance" || e.kind === "reward";
+export const gradeKey = (p, year) =>
+  `${p.degree}_${p.grade + Number(year) - p.start_year}`;
+export const recordStart = (p) =>
+  [BOOK_START, `${p.start_year}-01-01`].sort().at(-1);
+// Remove retired fields from cached version 1/2 entries before reusing them.
+export function cleanEntry(e) {
+  const { funding, reimbursed, salary_manual, ...entry } = e;
+  return entry;
+}
 export const SALARY_GRADES = [
   "master_1",
   "master_2",
@@ -87,7 +93,7 @@ export function tripPay(start, end, underground = 0) {
 }
 export function normalizeEntry(e) {
   const value = {
-    ...e,
+    ...cleanEntry(e),
     end_date: e.end_date || e.date,
     items: e.kind === "expense" ? e.items || [] : [],
     is_trip: e.kind === "expense" && !!e.is_trip,
@@ -140,17 +146,8 @@ export function validEntry(e, p) {
     throw new Error("费用分类无效");
   if (e.items?.length && e.items.reduce((n, i) => n + i.amount, 0) !== e.amount)
     throw new Error("明细与费用合计不一致");
-  if (
-    !Number.isSafeInteger(e.reimbursed) ||
-    e.reimbursed < 0 ||
-    e.reimbursed > e.amount
-  )
-    throw new Error("报销金额不能超过垫付金额");
-  if (!Object.hasOwn(FUNDING, e.funding)) throw new Error("支付方式无效");
-  if (e.funding !== "advance" && e.reimbursed !== 0)
-    throw new Error("只有个人垫付可以报销");
-  if (e.kind !== "expense" && (e.funding !== "team" || e.reimbursed !== 0))
-    throw new Error("工资、补助与奖金由课题组支付");
+  if (e.date < recordStart(p))
+    throw new Error("记账从 2026 年 6 月及成员在读年度起始日期开始");
   if (e.is_trip)
     tripPay(e.date, e.end_date || e.date, Number(e.underground_days || 0));
   if ((e.note || "").length > 1000) throw new Error("备注不能超过 1000 字");
@@ -160,7 +157,7 @@ export function validEntry(e, p) {
 export function ledgerEntries(entries) {
   const ids = new Set(entries.map((e) => e.id));
   return entries.flatMap((e) => {
-    if (e.deleted) return [];
+    if (e.deleted || e.date < BOOK_START) return [];
     if (e.kind !== "expense" || !e.is_trip || ids.has(`trip-${e.id}`))
       return [e];
     const pay = tripPay(
@@ -178,8 +175,6 @@ export function ledgerEntries(entries) {
         category: "出差工资",
         description: `出差工资 · ${e.description}`.slice(0, 200),
         amount: pay.amount,
-        funding: "team",
-        reimbursed: 0,
         items: [],
         is_trip: false,
         note: `${pay.days} 天 × 120 元 + 下井 ${pay.underground} 天 × 60 元；随原事务修改，不重复记账。`,
@@ -209,36 +204,23 @@ export function summary(entries, { owner, year, month } = {}) {
   const total = {
     income: 0,
     expense: 0,
+    research: 0,
     salary: 0,
     allowance: 0,
     reward: 0,
     trip_salary: 0,
-    pending: 0,
-    personal: 0,
-    reimbursed: 0,
-    team: 0,
     count: rows.length,
   };
   for (const e of rows) {
-    if (e.kind !== "expense") {
-      total.income += e.amount;
-      if (Object.hasOwn(total, e.kind)) total[e.kind] += e.amount;
-    } else {
-      total.expense += e.amount;
-      if (e.funding === "advance") {
-        total.pending += e.amount - e.reimbursed;
-        total.reimbursed += e.reimbursed;
-      }
-      if (e.funding === "personal") total.personal += e.amount;
-      if (e.funding === "team") total.team += e.amount;
-    }
+    if (isIncome(e)) total.income += e.amount;
+    else total.expense += e.amount;
+    if (e.kind === "expense") total.research += e.amount;
+    else if (Object.hasOwn(total, e.kind)) total[e.kind] += e.amount;
   }
   return {
     ...total,
-    teamOutlay: total.income + total.team + total.reimbursed,
-    teamCost: total.income + total.team + total.reimbursed + total.pending,
+    teamOutlay: total.income,
     gap: total.income - total.expense,
-    net: total.income - total.pending - total.personal,
   };
 }
 export function warning(s, all, settings) {
@@ -256,9 +238,46 @@ export const monthly = (entries, year, owner) =>
     ...summary(entries, { owner, year, month: i + 1 }),
     month: i + 1,
   }));
-export function salaryFor(p, month, settings) {
-  const grade = p.grade + Number(month.slice(0, 4)) - p.start_year;
-  return Number(settings.salary_rates?.[`${p.degree}_${grade}`] || 0);
+export function salaryFor(p, year, rates) {
+  return Number(rates?.[gradeKey(p, String(year).slice(0, 4))] || 0);
+}
+export function generateSalaries(data, at = today()) {
+  const d = structuredClone(data);
+  for (const rule of d.salaryRules || [])
+    for (const p of d.profiles.filter(
+      (p) => p.role === "student" && years(p).includes(rule.year),
+    )) {
+      for (let month = 1; month <= 12; month++) {
+        const date = `${rule.year}-${String(month).padStart(2, "0")}-01`;
+        if (date < recordStart(p) || date > at) continue;
+        const amount = salaryFor(p, rule.year, rule.rates);
+        const old = d.entries.find(
+          (e) => e.owner_id === p.id && e.salary_month === date,
+        );
+        if (old) {
+          if (old.amount !== amount || old.deleted) {
+            old.amount = amount;
+            old.deleted = false;
+            old.version = (old.version || 0) + 1;
+          }
+        } else
+          d.entries.push({
+            id: crypto.randomUUID(),
+            owner_id: p.id,
+            date,
+            end_date: date,
+            salary_month: date,
+            kind: "salary",
+            category: "固定工资",
+            description: "当月固定工资（支出）",
+            amount,
+            note: "年度年级标准自动记账；已包含在实际补助中",
+            version: 1,
+            deleted: false,
+          });
+      }
+    }
+  return d;
 }
 export function seed() {
   const y = Number(today().slice(0, 4)),
@@ -291,13 +310,13 @@ export function seed() {
       start_year: y,
       end_year: y + (i < 5 ? 3 : 5) - ((i % 3) + 1),
       monthly_stipend: i < 5 ? 120000 : 180000,
-      start_month: `${y}-01-01`,
+      start_month: [BOOK_START, `${y}-01-01`].sort().at(-1),
       email: `member${i + 1}@example.edu`,
     })),
   ];
   const entries = [];
   for (const [i, p] of profiles.slice(1).entries())
-    for (let k = 1; k <= m; k++) {
+    for (let k = y === 2026 ? 6 : 1; k <= m; k++) {
       entries.push({
         id: `allow-${p.id}-${k}`,
         owner_id: p.id,
@@ -307,9 +326,21 @@ export function seed() {
         category: "固定工资",
         description: "当月固定工资",
         amount: p.monthly_stipend,
-        reimbursed: 0,
-        funding: "team",
         note: "定额自动记账 · 演示数据",
+        version: 1,
+        deleted: false,
+      });
+      entries.push({
+        id: `subsidy-${p.id}-${k}`,
+        owner_id: p.id,
+        date: `${y}-${String(k).padStart(2, "0")}-01`,
+        kind: "allowance",
+        category: "月度补助",
+        description: "实际月度补助（含固定工资）",
+        amount: p.monthly_stipend + 100000,
+        allowance_month: `${y}-${String(k).padStart(2, "0")}-01`,
+        allowance_manual: false,
+        note: "演示数据",
         version: 1,
         deleted: false,
       });
@@ -329,8 +360,6 @@ export function seed() {
             "材料测试加工",
           ][(i + k + j) % 5],
           amount,
-          reimbursed: k < m && j === 0 ? amount : 0,
-          funding: j === 0 ? "advance" : i % 3 === 0 ? "personal" : "team",
           note: "科研项目日常支出",
           version: 1,
           deleted: false,
@@ -380,6 +409,22 @@ export function seed() {
       },
     ],
     claims: [{ task_id: "demo-task-2", student_id: "demo-3" }],
+    salaryRules: [
+      {
+        year: y,
+        rates: {
+          master_1: 120000,
+          master_2: 120000,
+          master_3: 120000,
+          doctor_1: 180000,
+          doctor_2: 180000,
+          doctor_3: 180000,
+          doctor_4: 180000,
+          doctor_5: 180000,
+        },
+        version: 1,
+      },
+    ],
     settings: {
       id: 1,
       salary_rates: {

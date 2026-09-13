@@ -53,12 +53,12 @@ test("多项费用和工资各统计一次，重建投影不重复", () => {
   assert.equal(rows.length, 2);
   assert.equal(ledgerEntries(rows).length, 2);
   const s = summary(rows);
-  assert.equal(s.expense, 260000);
-  assert.equal(s.income, 162000);
+  assert.equal(s.expense, 422000);
+  assert.equal(s.income, 0);
   assert.equal(s.trip_salary, 162000);
-  assert.equal(s.net, -98000);
-  assert.equal(s.teamOutlay, 162000);
-  assert.equal(s.teamCost, 422000);
+  assert.equal(s.gap, -422000);
+  assert.equal(s.teamOutlay, 0);
+  assert.equal(s.research, 260000);
   const cats = categoryTotals(rows);
   assert.equal(cats["差旅费"], 240000);
   assert.equal(cats["招待费"], 20000);
@@ -69,7 +69,7 @@ test("修改出差日期/下井次数重算，删除原事务同时去掉工资"
     end_date: "2026-07-20",
     underground_days: 0,
   });
-  assert.equal(summary([edited]).income, 24000);
+  assert.equal(summary([edited]).trip_salary, 24000);
   assert.equal(summary([{ ...trip, deleted: true }]).income, 0);
   assert.equal(summary([{ ...trip, deleted: true }]).expense, 0);
 });
@@ -87,15 +87,15 @@ test("工资、月度补助、奖金在对应年月与成员汇总中一致", ()
     trip,
   ];
   const august = summary(rows, { owner: "alice", year: 2026, month: 8 });
-  assert.equal(august.income, 520000);
+  assert.equal(august.income, 420000);
   assert.equal(august.salary, 100000);
   assert.equal(august.allowance, 400000);
   assert.equal(august.reward, 20000);
-  assert.equal(august.teamOutlay, 520000);
+  assert.equal(august.teamOutlay, 420000);
   assert.equal(summary(rows, { owner: "bob", month: 8 }).income, 0);
-  assert.equal(summary(rows, { year: 2026 }).income, 682000);
+  assert.equal(summary(rows, { year: 2026 }).income, 420000);
 });
-test("支持零元，拒绝负数金额、超额报销和非整分", () => {
+test("支持零元，拒绝负数金额、六月以前日期和非整分", () => {
   const zero = normalizeEntry({
     ...trip,
     items: [{ name: "免费测试", category: "测试费", amount: 0 }],
@@ -104,26 +104,33 @@ test("支持零元，拒绝负数金额、超额报销和非整分", () => {
   });
   assert.equal(validEntry(zero, p).amount, 0);
   assert.throws(() => validEntry({ ...zero, amount: -1 }, p));
-  assert.throws(() => validEntry({ ...zero, reimbursed: 1 }, p));
+  assert.throws(() => validEntry({ ...zero, date: "2026-05-31" }, p));
   assert.throws(() => validEntry({ ...zero, amount: 1.5 }, p));
 });
 test("自然年培养档案随年度使用对应年级标准", () => {
   const settings = { salary_rates: { master_2: 100000, master_3: 120000 } };
-  assert.equal(salaryFor(p, "2026-12", settings), 100000);
-  assert.equal(salaryFor(p, "2027-01", settings), 120000);
+  assert.equal(salaryFor(p, "2026-12", settings.salary_rates), 100000);
+  assert.equal(salaryFor(p, "2027-01", settings.salary_rates), 120000);
 });
 test("Excel 日期范围、四项费用和工资金额为数值且不重复", async () => {
-  const bytes = await buildExcel([trip], [{id:'alice',name:'学生甲',role:'student'}], '出差报表');
-  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
-  assert.equal(wb.worksheets.length,3);
-  const ledger=wb.getWorksheet('财务明细'),details=wb.getWorksheet('费用分项'),totals=wb.getWorksheet('成员汇总');
-  assert.equal(ledger.rowCount,4);
-  assert.equal(ledger.getCell('F3').value,2600);
-  assert.equal(ledger.getCell('F4').value,1620);
-  assert.equal(ledger.getCell('K3').value,'2026-07-30');
-  assert.equal(ledger.getCell('L3').value,12);
-  assert.equal(details.rowCount,5);
-  assert.equal(details.getCell('G2').type,ExcelJS.ValueType.Number);
-  assert.equal(totals.getCell('B2').value,1620);
-  assert.equal(totals.getCell('C2').value,2600);
+  const bytes = await buildExcel(
+    [trip],
+    [{ id: "alice", name: "学生甲", role: "student" }],
+    "出差报表",
+  );
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(bytes);
+  assert.equal(wb.worksheets.length, 3);
+  const ledger = wb.getWorksheet("财务明细"),
+    details = wb.getWorksheet("费用分项"),
+    totals = wb.getWorksheet("成员汇总");
+  assert.equal(ledger.rowCount, 4);
+  assert.equal(ledger.getCell("F3").value, 2600);
+  assert.equal(ledger.getCell("F4").value, 1620);
+  assert.equal(ledger.getCell("K3").value, "2026-07-30");
+  assert.equal(ledger.getCell("L3").value, 12);
+  assert.equal(details.rowCount, 5);
+  assert.equal(details.getCell("G2").type, ExcelJS.ValueType.Number);
+  assert.equal(totals.getCell("F2").value, 1620);
+  assert.equal(totals.getCell("G2").value, 2600);
 });

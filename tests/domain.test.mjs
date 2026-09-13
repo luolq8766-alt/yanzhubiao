@@ -74,17 +74,17 @@ const entries = [
     deleted: true,
   },
 ];
-test("报销不重复增加收入，正确计算个人净收入", () => {
+test("收入、科研花费与账面差额", () => {
   const s = summary(entries, { owner: "a", year: 2026, month: 9 });
   assert.equal(s.income, 120000);
   assert.equal(s.expense, 90000);
   assert.equal(s.gap, 30000);
-  assert.equal(s.pending, 30000);
-  assert.equal(s.net, 80000);
+  assert.equal(s.research, 90000);
+  assert.equal(s.teamOutlay, 120000);
   assert.equal(s.count, 4);
 });
 test("年月、归属与软删除筛选", () => {
-  assert.equal(summary(entries, { year: 2025 }).income, 999999);
+  assert.equal(summary(entries, { year: 2025 }).income, 0);
   assert.equal(summary(entries, { month: 10, owner: "a" }).count, 0);
 });
 test("预算警戒在80%与100%生效；正结余不报警", () => {
@@ -96,7 +96,7 @@ test("预算警戒在80%与100%生效；正结余不报警", () => {
   assert.equal(warning({ expense: 0 }, { gap: -200000 }, settings), "red");
   assert.equal(warning({ expense: 0 }, { gap: 400000 }, settings), "green");
 });
-test("拒绝无效日期、越界年度与超额报销", () => {
+test("拒绝无效日期、越界年度与六月以前日期", () => {
   const p = { degree: "master", grade: 2, start_year: 2026 };
   const e = {
     date: "2026-09-01",
@@ -110,5 +110,5 @@ test("拒绝无效日期、越界年度与超额报销", () => {
   assert.equal(validEntry(e, p), e);
   assert.throws(() => validEntry({ ...e, date: "2026-02-30" }, p));
   assert.throws(() => validEntry({ ...e, date: "2028-01-01" }, p));
-  assert.throws(() => validEntry({ ...e, reimbursed: 101 }, p));
+  assert.throws(() => validEntry({ ...e, date: "2026-05-31" }, p));
 });

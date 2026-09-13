@@ -48,7 +48,9 @@ import {
   CATEGORIES,
   COLORS,
   KIND,
-  FUNDING,
+  isIncome,
+  BOOK_START,
+  recordStart,
   today,
   money,
   cents,
@@ -464,7 +466,8 @@ function Onboarding({ onMessage }) {
             />
           </Field>
           <p className="subtle-note">
-            例如：硕士 2 年级，从 2026 年开始，生成 2026、2027 两年报表。
+            例如：硕士 2 年级，从 2026 年开始，生成 2026、2027 两年报表；记账从
+            2026 年 6 月起。
           </p>
           <button className="primary full-width" disabled={busy}>
             保存档案并进入
@@ -485,7 +488,7 @@ export default function App() {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [view, setView] = useState("dashboard"),
     [year, setYear] = useState(Number(today().slice(0, 4))),
-    [month, setMonth] = useState(Number(today().slice(5, 7))),
+    [month, setMonth] = useState(0),
     [owner, setOwner] = useState(""),
     [query, setQuery] = useState(""),
     [modal, setModal] = useState(null),
@@ -842,9 +845,9 @@ export default function App() {
                 {view === "dashboard"
                   ? teacher
                     ? `${members.length} 位研究伙伴，一个清晰有序的经费账本。`
-                    : "记录科研投入，也照顾你的资金周转。"
+                    : "记清实际补助与账面支出，按月核对差额。"
                   : view === "ledger"
-                    ? "按年度与月份归档，报销与个人承担一目了然。"
+                    ? "补助收入与工资、出差、科研花费按年月归档。"
                     : view === "analysis"
                       ? "从费用结构到月度趋势，让资金安排更有依据。"
                       : view === "tasks"
@@ -917,7 +920,11 @@ export default function App() {
                 >
                   <option value="0">全年汇总</option>
                   {Array.from({ length: 12 }, (_, i) => (
-                    <option key={i} value={i + 1}>
+                    <option
+                      key={i}
+                      value={i + 1}
+                      disabled={year === 2026 && i < 5}
+                    >
                       {i + 1} 月
                     </option>
                   ))}
@@ -943,52 +950,55 @@ export default function App() {
               </span>
             </div>
           )}
+          {["dashboard", "ledger", "analysis"].includes(view) && (
+            <div className="notice period-explainer">
+              <CalendarDays size={18} />
+              <span>
+                记账起点：2026 年 6 月 ·{" "}
+                {month
+                  ? `当前查看 ${year} 年 ${month} 月`
+                  : `当前查看 ${year} 年度汇总`}
+                。{teacher ? "累计已发补助与奖金" : "累计补助与奖金"}：
+                <b>{money(all.income)}</b>。固定工资已包含在补助中。
+              </span>
+            </div>
+          )}
           {view === "dashboard" && (
             <>
               <div className="stats-grid">
                 <Stat
-                  label={teacher ? "团队已记账支出" : "本期科研费用"}
-                  value={teacher ? total.teamOutlay : total.expense}
-                  caption={
-                    teacher
-                      ? `含待报销款的团队费用 ${money(total.teamCost)}`
-                      : `${periodEntries.filter((e) => e.kind === "expense").length} 笔费用 · 不含工资`
-                  }
+                  label={teacher ? "本期团队已记账支出" : "本期补助与奖金"}
+                  value={total.income}
+                  caption="实际补助（含固定工资）+ 奖金"
                   icon={Wallet}
                   accent
                 />
                 <Stat
-                  label={
-                    month ? "本月工资、补助与奖金" : "本年工资、补助与奖金"
-                  }
-                  value={total.income}
-                  caption="固定工资 + 月度补助 + 出差工资 + 奖金"
+                  label="本期学生账面支出"
+                  value={total.expense}
+                  caption="固定工资 + 出差工资 + 科研花费"
                   icon={Coins}
                 />
                 <Stat
-                  label="待报销垫付"
-                  value={total.pending}
-                  caption="本期支出中，仍待回款的部分"
-                  icon={ArrowUpRight}
+                  label="本期科研花费"
+                  value={total.research}
+                  caption="出差及科研事务的费用记录"
+                  icon={NotebookPen}
                 />
                 <Stat
-                  label={teacher ? "本期收支差额" : "实际研助净收入"}
-                  value={teacher ? total.gap : total.net}
-                  caption={
-                    teacher
-                      ? "工资、补助与奖金 − 全部科研支出"
-                      : "工资、补助与奖金 − 待报销 − 个人承担"
-                  }
+                  label="本期账面差额"
+                  value={total.gap}
+                  caption="补助与奖金 − 学生账面支出"
                   icon={ChartNoAxesCombined}
-                  negative={(teacher ? total.gap : total.net) < 0}
+                  negative={total.gap < 0}
                 />
               </div>
               <div className="income-breakdown">
                 {[
-                  ["固定工资", total.salary],
-                  ["月度补助", total.allowance],
-                  ["出差工资", total.trip_salary],
-                  ["奖金", total.reward],
+                  ["固定工资 · 支出", total.salary],
+                  ["实际补助 · 收入", total.allowance],
+                  ["出差工资 · 支出", total.trip_salary],
+                  ["奖金 · 收入", total.reward],
                 ].map(([label, value]) => (
                   <div key={label}>
                     <span>{label}</span>
@@ -1001,7 +1011,7 @@ export default function App() {
                   <div className="panel-heading">
                     <div>
                       <h2>
-                        年度支出趋势{" "}
+                        年度收支趋势{" "}
                         <span className="muted small-text">/ 元</span>
                       </h2>
                       <p>了解每个月的研究投入</p>
@@ -1009,11 +1019,11 @@ export default function App() {
                     <div className="chart-key">
                       <span>
                         <i />
-                        科研支出
+                        工资与科研支出
                       </span>
                       <span>
                         <i />
-                        工资、补助与奖金
+                        补助与奖金
                       </span>
                     </div>
                   </div>
@@ -1040,7 +1050,7 @@ export default function App() {
                           {overviewMembers.length}
                         </span>
                       </h2>
-                      <p>关注每位伙伴的支出与垫付情况</p>
+                      <p>按成员核对补助、工资和科研支出</p>
                     </div>
                     {alertMembers.length > 0 ? (
                       <Badge tone="yellow">
@@ -1055,9 +1065,9 @@ export default function App() {
                       <thead>
                         <tr>
                           <th>成员</th>
-                          <th>本期支出</th>
-                          <th>本期研助</th>
-                          <th>待报销垫付</th>
+                          <th>账面支出</th>
+                          <th>补助与奖金</th>
+                          <th>科研花费</th>
                           <th>累计差额</th>
                           <th>{month ? "预算状态" : "单月 / 累计预警"}</th>
                           <th></th>
@@ -1102,7 +1112,7 @@ export default function App() {
                                 </div>
                               </td>
                               <td className="numeric">{money(s.income)}</td>
-                              <td className="numeric">{money(s.pending)}</td>
+                              <td className="numeric">{money(s.research)}</td>
                               <td
                                 className={`numeric ${a.gap < 0 ? "negative" : ""}`}
                               >
@@ -1174,19 +1184,15 @@ export default function App() {
                     </div>
                   </section>
                   <section className="panel cash-card">
-                    <span className="eyebrow">个人资金状态 · 累计</span>
-                    <h2>
-                      {all.pending > 0
-                        ? "还有垫付款，记得跟进报销。"
-                        : "垫付已结清，安心开展研究。"}
-                    </h2>
-                    <strong>{money(all.net)}</strong>
-                    <p>实际净收入 · 待报销 {money(all.pending)}</p>
+                    <span className="eyebrow">个人账面差额 · 累计</span>
+                    <h2>补助与支出，逐笔核对。</h2>
+                    <strong>{money(all.gap)}</strong>
+                    <p>累计差额 · 补助与奖金 {money(all.income)}</p>
                     <button
                       className="text-button"
                       onClick={() => setView("analysis")}
                     >
-                      查看清算明细
+                      查看差额明细
                       <ArrowRight size={16} />
                     </button>
                   </section>
@@ -1221,15 +1227,15 @@ export default function App() {
                   <strong>{money(all.gap)}</strong>
                 </div>
                 <div>
-                  <span>本期实际净收入</span>
-                  <strong>{money(total.net)}</strong>
+                  <span>本期补助与奖金</span>
+                  <strong>{money(total.income)}</strong>
                 </div>
               </div>
               <section className="panel">
                 <div className="panel-heading">
                   <div>
                     <h2>财务流水</h2>
-                    <p>支持日期、科研事务、费用分类与报销状态记录</p>
+                    <p>日期范围、费用明细、工资支出与补助收入</p>
                   </div>
                   <div className="search">
                     <Search size={17} />
@@ -1249,7 +1255,7 @@ export default function App() {
                         <th>具体事务</th>
                         <th>分类</th>
                         <th>金额</th>
-                        <th>支付 / 报销</th>
+                        <th>收支方向</th>
                         <th>备注</th>
                         <th>操作</th>
                       </tr>
@@ -1266,9 +1272,9 @@ export default function App() {
                           <td>
                             <div className="entry-description">
                               <span
-                                className={`entry-icon ${e.kind !== "expense" ? "income" : ""}`}
+                                className={`entry-icon ${isIncome(e) ? "income" : ""}`}
                               >
-                                {e.kind === "expense" ? (
+                                {!isIncome(e) ? (
                                   <ArrowUpRight size={17} />
                                 ) : (
                                   <ArrowDownLeft size={17} />
@@ -1304,44 +1310,24 @@ export default function App() {
                             <Badge tone="gray">{e.category}</Badge>
                           </td>
                           <td
-                            className={`numeric ${e.kind !== "expense" ? "positive" : ""}`}
+                            className={`numeric ${isIncome(e) ? "positive" : ""}`}
                           >
                             <b>
-                              {e.kind === "expense" ? "−" : "+"}
+                              {isIncome(e) ? "+" : "−"}
                               {money(e.amount)}
                             </b>
                           </td>
                           <td>
-                            {e.kind === "expense" ? (
-                              <>
-                                <span>{FUNDING[e.funding]}</span>
-                                {e.funding === "advance" && (
-                                  <small
-                                    className={
-                                      e.reimbursed < e.amount
-                                        ? "negative"
-                                        : "positive"
-                                    }
-                                  >
-                                    {e.amount === 0
-                                      ? "零元，无需报销"
-                                      : e.reimbursed >= e.amount
-                                        ? "已报销"
-                                        : `待报销 ${money(e.amount - e.reimbursed)}`}
-                                  </small>
-                                )}
-                              </>
-                            ) : (
-                              <small>研助收入</small>
-                            )}
+                            <span>{isIncome(e) ? "收入" : "支出"}</span>
                           </td>
                           <td className="note-cell">{e.note || "—"}</td>
                           <td>
                             {!e.source_entry_id &&
                             !e.task_id &&
+                            e.kind !== "salary" &&
                             (teacher ||
-                              ((e.kind === "expense" || e.kind === "reward") &&
-                                !e.reimbursed)) ? (
+                              e.kind === "expense" ||
+                              e.kind === "reward") ? (
                               <div className="row-actions">
                                 <button
                                   className="icon-btn"
@@ -1368,7 +1354,9 @@ export default function App() {
                                   ? "随出差事务联动"
                                   : e.task_id
                                     ? "任务自动记账"
-                                    : "老师维护"}
+                                    : e.kind === "salary"
+                                      ? "年度年级标准"
+                                      : "老师维护"}
                               </span>
                             )}
                           </td>
@@ -1388,7 +1376,7 @@ export default function App() {
                   <span>
                     共 {visibleEntries.length} 笔{query ? "匹配记录" : ""}
                   </span>
-                  <span>差额 = 工资、补助与奖金 − 全部科研支出</span>
+                  <span>差额 = 补助与奖金 − 工资与科研支出</span>
                 </div>
               </section>
             </>
@@ -1397,33 +1385,27 @@ export default function App() {
             <>
               <div className="stats-grid">
                 <Stat
-                  label="累计工资、补助与奖金"
-                  value={all.income}
-                  caption="全部培养年度的已记账补助"
+                  label="累计实际补助"
+                  value={all.allowance}
+                  caption="包含固定工资的实际发放金额"
                   icon={Coins}
                 />
                 <Stat
-                  label="累计待报销垫付"
-                  value={all.pending}
-                  caption={
-                    all.pending ? "存在尚未回款的垫资" : "当前垫付已结清"
-                  }
+                  label="累计固定工资支出"
+                  value={all.salary}
+                  caption="按年度年级标准生成"
                   icon={Wallet}
                 />
                 <Stat
-                  label="累计个人承担"
-                  value={all.personal}
-                  caption="个人自行承担、无需报销"
-                  icon={ArrowUpRight}
+                  label="累计出差工资支出"
+                  value={all.trip_salary}
+                  caption="出差天数与下井天数计算"
+                  icon={CalendarDays}
                 />
                 <Stat
-                  label="累计实际净收入"
-                  value={all.net}
-                  caption={
-                    all.net < 0
-                      ? "净收入为负 · 需关注资金周转"
-                      : "扣除待报销垫付与个人成本"
-                  }
+                  label="累计账面差额"
+                  value={all.gap}
+                  caption="补助与奖金减去全部账面支出"
                   icon={ChartNoAxesCombined}
                   accent
                 />
@@ -1432,8 +1414,8 @@ export default function App() {
                 <section className="panel">
                   <div className="panel-heading">
                     <div>
-                      <h2>一年中的投入节奏</h2>
-                      <p>按完整自然年度展示</p>
+                      <h2>年度收支趋势</h2>
+                      <p>补助与奖金收入 · 工资与科研支出</p>
                     </div>
                   </div>
                   <Trend entries={entries} year={year} owner={selectedOwner} />
@@ -1441,69 +1423,39 @@ export default function App() {
                 <section className="panel">
                   <div className="panel-heading">
                     <div>
-                      <h2>本期费用分类</h2>
-                      <p>{month ? month + " 月" : "全年"} · 科研支出比例</p>
+                      <h2>科研花费分类</h2>
+                      <p>所选期间的费用明细，不包含工资</p>
                     </div>
                   </div>
                   <Donut entries={periodEntries} />
                 </section>
               </div>
-              <div className="analysis-grid">
-                <section className="panel">
-                  <div className="panel-heading">
-                    <h2>实际研助净收入清算</h2>
-                    <Wallet size={20} />
-                  </div>
-                  <div className="calculation">
-                    <div>
-                      <span>累计工资、补助与奖金</span>
-                      <b>{money(all.income)}</b>
+              <section className="panel">
+                <div className="panel-heading">
+                  <h2>累计账面差额核对</h2>
+                </div>
+                <div className="calculation">
+                  {[
+                    ["实际补助（含固定工资）", all.allowance],
+                    ["＋ 奖金", all.reward],
+                    ["− 固定工资支出", all.salary],
+                    ["− 出差工资支出", all.trip_salary],
+                    ["− 出差及科研花费", all.research],
+                  ].map(([name, value]) => (
+                    <div key={name}>
+                      <span>{name}</span>
+                      <b>{money(value)}</b>
                     </div>
-                    <div>
-                      <span>− 个人垫付尚未报销金额</span>
-                      <b>{money(all.pending)}</b>
-                    </div>
-                    <div>
-                      <span>− 个人承担出差及其他成本</span>
-                      <b>{money(all.personal)}</b>
-                    </div>
-                    <div className="calculation-total">
-                      <span>实际研助净收入</span>
-                      <strong>{money(all.net)}</strong>
-                    </div>
+                  ))}
+                  <div className="calculation-total">
+                    <span>累计账面差额</span>
+                    <strong>{money(all.gap)}</strong>
                   </div>
-                  <p className="subtle-note">
-                    报销到账后，由老师在原支出记录中更新已报销金额，不另计为研助收入。
-                  </p>
-                </section>
-                <section className="panel">
-                  <div className="panel-heading">
-                    <h2>预算观察</h2>
-                    <ChartNoAxesCombined size={20} />
-                  </div>
-                  <div className="insight-number">
-                    <strong>
-                      {annual.income
-                        ? Math.round((annual.expense / annual.income) * 100) +
-                          "%"
-                        : "—"}
-                    </strong>
-                    <span>年度科研支出 / 工资、补助与奖金</span>
-                  </div>
-                  <p className="muted">
-                    此比例用于观察经费结构，不等同于科研成果的投入产出比。
-                  </p>
-                  <div className="insight-note">
-                    <Info size={19} />
-                    <span>
-                      {Number(today().slice(0, 4)) === year
-                        ? `按已过去 ${Number(today().slice(5, 7))} 个月的月均支出估算，未来 6 个月约需 ${money(Math.round((summary(entries, { owner: selectedOwner, year }).expense / Number(today().slice(5, 7))) * 6))}。`
-                        : "历史或未来年度不生成资金预测。"}
-                      仅作资金安排参考。
-                    </span>
-                  </div>
-                </section>
-              </div>
+                </div>
+                <p className="subtle-note">
+                  按你们团队的补助制口径记录。出差花费仅登记为支出，不再另外增加团队发放金额。
+                </p>
+              </section>
             </>
           )}
           {view === "tasks" && (
@@ -1694,6 +1646,11 @@ export default function App() {
           )}
           {view === "settings" && (
             <Settings
+              onSaved={(y, m, p) => {
+                setYear(y);
+                setMonth(m);
+                setOwner(p);
+              }}
               profile={profile}
               members={members}
               data={state.data}
@@ -1947,9 +1904,9 @@ function EntryForm({
     (month && Number(initial.slice(5, 7)) !== month)
   )
     initial = `${year}-${String(month || 1).padStart(2, "0")}-01`;
+  if (initial < BOOK_START) initial = BOOK_START;
   const [kind, setKind] = useState(entry?.kind || "expense"),
-    [selected, setSelected] = useState(entry?.owner_id || owner),
-    [funding, setFunding] = useState(entry?.funding || "advance");
+    [selected, setSelected] = useState(entry?.owner_id || owner);
   const [start, setStart] = useState(entry?.date || initial),
     [end, setEnd] = useState(entry?.end_date || entry?.date || initial),
     [trip, setTrip] = useState(entry?.is_trip || false),
@@ -2023,11 +1980,6 @@ function EntryForm({
                 kind === "expense"
                   ? items.reduce((n, i) => n + i.amount, 0)
                   : cents(f.get("amount")),
-              funding: kind === "expense" ? funding : "team",
-              reimbursed:
-                kind === "expense" && funding === "advance"
-                  ? cents(f.get("reimbursed") || "0")
-                  : 0,
               note: f.get("note").trim(),
               deleted: false,
               items,
@@ -2076,7 +2028,7 @@ function EntryForm({
               type="date"
               value={start}
               disabled={lockedMonth}
-              min={`${ys[0]}-01-01`}
+              min={recordStart(person)}
               max={`${ys.at(-1)}-12-31`}
               required
               onChange={(e) => {
@@ -2235,40 +2187,13 @@ function EntryForm({
                     <p className="negative">{payError}</p>
                   )}
                   <p className="small-text muted">
-                    出发、返回当天都计入。出差工资单独计入收入，费用合计不包含工资。
+                    出发、返回当天都计入。出差工资另记一项支出，和上方费用合计一起计入账面支出。
                   </p>
                 </>
               )}
             </div>
-            <div className="form-grid">
-              <Field label="本次费用由谁承担">
-                <select
-                  value={funding}
-                  onChange={(e) => setFunding(e.target.value)}
-                >
-                  {Object.entries(FUNDING).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              {funding === "advance" && (
-                <Field label="已报销金额 / 元（老师确认）">
-                  <input
-                    name="reimbursed"
-                    type="number"
-                    min="0"
-                    max={totalAmount / 100}
-                    step="0.01"
-                    defaultValue={(entry?.reimbursed || 0) / 100}
-                    readOnly={!teacher}
-                  />
-                </Field>
-              )}
-            </div>
             <p className="subtle-note">
-              一笔事务的费用采用相同支付方式；不同支付方式可分笔记录。跨月事务的全部费用和出差工资计入开始日期所在月。
+              只需记录事务和费用。跨月事务的费用与出差工资计入开始日期所在月。
             </p>
           </>
         )}
@@ -2401,6 +2326,7 @@ function TaskForm({ task, busy, onClose, onSubmit }) {
 }
 
 function Settings({
+  onSaved,
   profile,
   members,
   data,
@@ -2414,7 +2340,13 @@ function Settings({
     <div className="settings-grid">
       {teacher ? (
         <div className="settings-main">
-          <Payroll members={members} data={data} run={run} busy={busy} />
+          <Payroll
+            onSaved={onSaved}
+            members={members}
+            data={data}
+            run={run}
+            busy={busy}
+          />
           <section className="panel settings-panel">
             <div className="panel-heading">
               <h2>团队名称与预算提醒</h2>
@@ -2447,7 +2379,7 @@ function Settings({
                 />
               </Field>
               <div className="form-grid">
-                <Field label="每人单月科研费用预警 / 元">
+                <Field label="每人单月账面支出预警 / 元">
                   <input
                     name="monthly_limit"
                     type="number"
@@ -2470,7 +2402,7 @@ function Settings({
               </div>
               <p className="subtle-note">
                 达到 80% 黄色提醒，达到 100%
-                红色提醒。科研费用阈值不包含工资、补助和奖金。
+                红色提醒。支出阈值包含固定工资、出差工资与科研花费。
               </p>
               <button className="primary" disabled={busy}>
                 保存团队设置
@@ -2498,18 +2430,15 @@ function Settings({
               <span>本月年级工资标准</span>
               <b>
                 {money(
-                  salaryFor(profile, today(), {
-                    salary_rates:
-                      [...(data.salaryRules || [])]
-                        .filter((r) => r.effective_month <= today())
-                        .sort((a, b) =>
-                          a.effective_month.localeCompare(b.effective_month),
-                        )
-                        .at(-1)?.rates ||
-                      data.settings.salary_rates ||
-                      {},
-                  }),
-                )}
+                  salaryFor(
+                    profile,
+                    Number(today().slice(0, 4)),
+                    data.salaryRules?.find(
+                      (r) => r.year === Number(today().slice(0, 4)),
+                    )?.rates || {},
+                  ),
+                )}{" "}
+                / 月（支出）
               </b>
             </div>
             <div>
@@ -2571,7 +2500,7 @@ function Settings({
           <img src="./icon.svg" alt="" />
           <div>
             <h3>研助表</h3>
-            <p>版本 2.0.0 · {cloud ? "云端团队版" : "本机演示版"}</p>
+            <p>版本 2.1.0 · {cloud ? "云端团队版" : "本机演示版"}</p>
           </div>
         </section>
       </div>

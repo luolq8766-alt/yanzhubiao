@@ -2,7 +2,8 @@ import {
   money,
   summary,
   KIND,
-  FUNDING,
+  isIncome,
+  cleanEntry,
   ledgerEntries,
   dateRange,
   tripPay,
@@ -21,7 +22,16 @@ export function exportBackup(data) {
     new Blob(
       [
         JSON.stringify(
-          { app: "研助表", exported_at: new Date().toISOString(), ...data },
+          {
+            app: "研助表",
+            exported_at: new Date().toISOString(),
+            ...data,
+            entries: data.entries?.map(cleanEntry),
+            queue: data.queue?.map((q) => ({
+              ...q,
+              entry: cleanEntry(q.entry),
+            })),
+          },
           null,
           2,
         ),
@@ -42,9 +52,9 @@ function rowsFor(entries, profiles) {
       e.category,
       e.description,
       e.amount / 100,
-      FUNDING[e.funding],
-      e.reimbursed / 100,
-      e.funding === "advance" ? (e.amount - e.reimbursed) / 100 : 0,
+      isIncome(e) ? "收入" : "支出",
+      isIncome(e) ? e.amount / 100 : 0,
+      isIncome(e) ? 0 : e.amount / 100,
       e.note || "",
       e.end_date || e.date,
       e.is_trip
@@ -79,9 +89,9 @@ export async function buildExcel(entries, profiles, title) {
     "分类",
     "具体事务",
     "金额（元）",
-    "支付方式",
-    "已报销（元）",
-    "待报销（元）",
+    "收支方向",
+    "收入（元）",
+    "支出（元）",
     "备注",
     "结束日期",
     "出差天数",
@@ -128,18 +138,15 @@ export async function buildExcel(entries, profiles, title) {
   const sums = wb.addWorksheet("成员汇总");
   sums.addRow([
     "成员",
-    "工资补助奖金（元）",
-    "科研支出（元）",
-    "差额（元）",
-    "待报销垫付（元）",
-    "个人承担（元）",
-    "实际净收入（元）",
-    "固定工资（元）",
-    "月度补助（元）",
-    "出差工资（元）",
+    "实际补助（元）",
     "奖金（元）",
+    "收入合计（元）",
+    "固定工资支出（元）",
+    "出差工资支出（元）",
+    "科研花费（元）",
+    "支出合计（元）",
+    "账面差额（元）",
     "团队已记账支出（元）",
-    "团队费用含待报销（元）",
   ]);
   profiles
     .filter((p) => p.role === "student")
@@ -147,33 +154,32 @@ export async function buildExcel(entries, profiles, title) {
       const s = summary(entries, { owner: p.id });
       sums.addRow([
         p.name,
-        s.income / 100,
-        s.expense / 100,
-        s.gap / 100,
-        s.pending / 100,
-        s.personal / 100,
-        s.net / 100,
-        s.salary / 100,
-        s.allowance / 100,
-        s.trip_salary / 100,
-        s.reward / 100,
-        s.teamOutlay / 100,
-        s.teamCost / 100,
+        ...[
+          s.allowance,
+          s.reward,
+          s.income,
+          s.salary,
+          s.trip_salary,
+          s.research,
+          s.expense,
+          s.gap,
+          s.teamOutlay,
+        ].map((n) => n / 100),
       ]);
     });
-  sums.columns.forEach((c) => (c.width = 23));
+  sums.columns.forEach((c) => (c.width = 25));
   sums.getRow(1).font = { bold: true };
   sums.eachRow((r, i) => {
-    if (i > 1) for (let j = 2; j <= 13; j++) r.getCell(j).numFmt = "#,##0.00";
+    if (i > 1) for (let j = 2; j <= 10; j++) r.getCell(j).numFmt = "#,##0.00";
   });
   sums.addRow([]);
   sums.addRow([
-    "差额=工资补助奖金-全部科研支出；净收入=工资补助奖金-待报销垫付-个人承担。",
+    "收入=实际补助（已含固定工资）+奖金；支出=固定工资+出差工资+科研花费；账面差额=收入-支出。",
   ]);
-  sums.addRow(["工资和补助为记账记录，不证明款项已汇入银行卡。"]);
   sums.addRow([
-    "团队已记账支出=工资+补助+出差工资+奖金+课题组直接支付+已报销；团队费用另加待报销垫付，不含学生个人承担。",
+    "团队已记账支出=实际补助+奖金。费用仅记录，不增加团队发放总额。",
   ]);
+  sums.addRow(["记账从2026年6月起；账面记录不证明银行实际转账。"]);
   const items = wb.addWorksheet("费用分项");
   items.addRow([
     "成员",
@@ -183,7 +189,7 @@ export async function buildExcel(entries, profiles, title) {
     "费用名称",
     "费用分类",
     "金额（元）",
-    "支付方式",
+    "收支方向",
     "关联事务编号",
   ]);
   for (const e of entries.filter((e) => e.kind === "expense"))
@@ -198,7 +204,7 @@ export async function buildExcel(entries, profiles, title) {
         item.name,
         item.category,
         item.amount / 100,
-        FUNDING[e.funding],
+        "支出",
         e.id,
       ]);
   items.columns = [14, 16, 16, 35, 25, 24, 18, 18, 40].map((width) => ({
@@ -232,7 +238,7 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
     "类型/分类",
     "具体事务",
     "金额（元）",
-    "支付/报销",
+    "收支方向",
     "备注",
   ];
   const line = (str, x, yy, size = 9) => {
@@ -293,11 +299,7 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
           ? "\n" + e.items.map((i) => `${i.name} ${money(i.amount)}`).join("；")
           : ""),
       money(e.amount).replace("¥", ""),
-      e.kind !== "expense"
-        ? "研助收入"
-        : e.funding === "advance"
-          ? `${FUNDING[e.funding]}\n已报销 ${money(e.reimbursed)}`
-          : FUNDING[e.funding],
+      isIncome(e) ? "收入" : "支出",
       e.note,
     ];
     const blocks = cols.map((t, i) => wrap(t, widths[i]));
@@ -332,21 +334,21 @@ export async function buildPDF(entries, profiles, title, fontBytes) {
   if (y < 120) newPage();
   y -= 14;
   line(
-    `工资补助奖金 ${money(s.income)}    科研支出 ${money(s.expense)}    本期差额 ${money(s.gap)}`,
+    `补助与奖金 ${money(s.income)}    账面支出 ${money(s.expense)}    本期差额 ${money(s.gap)}`,
     32,
     y,
     11,
   );
   y -= 24;
   line(
-    `待报销垫付 ${money(s.pending)}    个人承担 ${money(s.personal)}    实际净收入 ${money(s.net)}`,
+    `固定工资 ${money(s.salary)}    出差工资 ${money(s.trip_salary)}    科研花费 ${money(s.research)}`,
     32,
     y,
     10,
   );
   y -= 24;
   line(
-    "差额 = 工资补助奖金 - 科研支出；净收入 = 工资补助奖金 - 待报销垫付 - 个人承担。",
+    "账面差额 = 补助 + 奖金 - 固定工资 - 出差工资 - 科研花费。补助已包含固定工资。",
     32,
     y,
     9,

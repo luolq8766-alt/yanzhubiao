@@ -89,12 +89,7 @@ await deny(
   [{ ...entry, description: "越权" }, crypto.randomUUID()],
   /无权/,
 );
-await deny(
-  alice,
-  "select public.save_entry($1,1,$2)",
-  [{ ...entry, reimbursed: 100 }, crypto.randomUUID()],
-  /只能由老师/,
-);
+
 await deny(
   alice,
   "select public.save_entry($1,1,$2)",
@@ -113,12 +108,14 @@ await deny(
   [],
   /permission denied/,
 );
-await ok("老师确认报销", async () => {
-  const r = await as(teacher, "select public.save_entry($1,1,$2) e", [
-    { ...entry, reimbursed: 10000 },
+await ok("学生可修改历史费用，服务器剥离旧字段", async () => {
+  const r = await as(alice, "select public.save_entry($1,1,$2) e", [
+    { ...entry, amount: 60000 },
     crypto.randomUUID(),
   ]);
-  assert.equal(r.rows[0].e.reimbursed, 10000);
+  assert.equal(r.rows[0].e.amount, 60000);
+  assert(!("funding" in r.rows[0].e));
+  assert(!("reimbursed" in r.rows[0].e));
 });
 await deny(
   alice,
@@ -127,10 +124,10 @@ await deny(
   /CONFLICT/,
 );
 await deny(
-  alice,
+  teacher,
   "select public.save_entry($1,2,$2)",
-  [{ ...entry, amount: 60000, reimbursed: 10000 }, crypto.randomUUID()],
-  /已报销/,
+  [{ ...entry, date: "2026-05-31" }, crypto.randomUUID()],
+  /日期|年度/,
 );
 await deny(
   teacher,
@@ -181,45 +178,51 @@ const rates = {
   doctor_4: 180000,
   doctor_5: 190000,
 };
-await ok("按年级工资生成、重算与月度手动覆盖", async () => {
-  await as(teacher, "select public.save_salary_rules($1,$2,0)", [
-    nowMonth,
-    rates,
-  ]);
+await ok("年度工资回填六月到当月；全年度统一改价，不允许按月覆盖", async () => {
+  await as(teacher, "select public.save_annual_salary($1,$2,0)", [y, rates]);
   await as(teacher, "select public.ensure_allowances()");
   await as(teacher, "select public.ensure_allowances()");
   let r = await as(
     alice,
-    "select * from public.entries where salary_month=$1",
-    [nowMonth],
+    "select * from public.entries where salary_month is not null order by date",
   );
-  assert.equal(r.rows.length, 1);
-  assert.equal(r.rows[0].amount, 100000);
-  await as(teacher, "select public.save_salary_rules($1,$2,1)", [
-    nowMonth,
-    { ...rates, master_2: 200000 },
+  assert.equal(r.rows[0].date.toISOString().slice(0, 10), "2026-06-01");
+  assert.equal(r.rows.length, Number(nowMonth.slice(5, 7)) - 5);
+  assert(r.rows.every((e) => e.amount === 100000));
+  await as(teacher, "select public.save_annual_salary($1,$2,1)", [
+    y,
+    { ...rates, master_2: 150000 },
   ]);
-  r = await as(alice, "select * from public.entries where salary_month=$1", [
-    nowMonth,
-  ]);
-  assert.equal(r.rows[0].amount, 200000);
-  await as(teacher, "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)", [
+  r = await as(
     alice,
-    nowMonth,
-    "salary",
-    250000,
-    r.rows[0].version,
-    crypto.randomUUID(),
-  ]);
-  await as(teacher, "select public.save_salary_rules($1,$2,2)", [
-    nowMonth,
-    { ...rates, master_2: 300000 },
-  ]);
-  r = await as(alice, "select * from public.entries where salary_month=$1", [
-    nowMonth,
-  ]);
-  assert.equal(r.rows[0].amount, 250000);
-  assert.equal(r.rows[0].salary_manual, true);
+    "select * from public.entries where salary_month is not null order by date",
+  );
+  assert(r.rows.every((e) => e.amount === 150000));
+  assert.equal(new Set(r.rows.map((e) => e.salary_month)).size, r.rows.length);
+  await deny(
+    teacher,
+    "select public.save_monthly_payment($1,$2,$3,$4,$5,$6)",
+    [alice, nowMonth, "salary", 999, 2, crypto.randomUUID()],
+    /年度/,
+  );
+  await deny(
+    teacher,
+    "select public.save_entry($1,2,$2)",
+    [{ ...r.rows[0], amount: 999 }, crypto.randomUUID()],
+    /年度/,
+  );
+  await deny(
+    alice,
+    "select public.save_annual_salary($1,$2,2)",
+    [y, rates],
+    /仅老师/,
+  );
+  await deny(
+    teacher,
+    "select public.save_annual_salary($1,$2,1)",
+    [y, rates],
+    /CONFLICT/,
+  );
 });
 await ok("老师指定8月补助2000改4000，重试不重复入账", async () => {
   let r = await as(
@@ -345,6 +348,87 @@ await ok("学生可自行录入奖金；任务验收仅生成一次奖金", asyn
     (await as(bob, "select * from public.entries where task_id=$1", [task.id]))
       .rows.length,
     0,
+  );
+});
+const carol = "00000000-0000-4000-8000-000000000004";
+await db.exec(
+  `reset role;insert into auth.users values('${carol}','carol@test.edu',now());insert into private.allowed_emails values('carol@test.edu','student')`,
+);
+await as(carol, "select public.register_profile('丙','master',2,2026)");
+await ok("六月七月八月补助均进入年度总额，工资不再加到团队发放", async () => {
+  for (const m of ["06", "07"])
+    await as(
+      teacher,
+      "select public.save_monthly_payment($1,$2,'allowance',200000,0,$3)",
+      [alice, `2026-${m}-01`, crypto.randomUUID()],
+    );
+  const rows = (
+    await as(teacher, "select to_jsonb(e) e from public.entries e")
+  ).rows.map((r) => r.e);
+  const { summary } = await import("../src/domain.js");
+  assert.equal(
+    summary(rows, { owner: alice, year: 2026, month: 6 }).allowance,
+    200000,
+  );
+  assert.equal(
+    summary(rows, { owner: alice, year: 2026, month: 7 }).allowance,
+    200000,
+  );
+  const all = summary(rows, { owner: alice, year: 2026 });
+  assert.equal(all.allowance, 800000);
+  assert.equal(all.teamOutlay, all.allowance + all.reward);
+});
+await ok("年级统一补助保留个人设置，明确覆盖且重复请求幂等", async () => {
+  const op = crypto.randomUUID();
+  const args = [
+    "2026-08-01",
+    "master_2",
+    300000,
+    { [alice]: 2, [carol]: 0 },
+    false,
+    op,
+  ];
+  const sql = "select public.save_grade_allowance($1,$2,$3,$4,$5,$6) r";
+  const a = (await as(teacher, sql, args)).rows[0].r;
+  assert.equal(a.changed, 1);
+  assert.equal(a.preserved, 1);
+  assert.deepEqual((await as(teacher, sql, args)).rows[0].r, a);
+  const b = (
+    await as(teacher, sql, [
+      "2026-08-01",
+      "master_2",
+      350000,
+      { [alice]: 2, [carol]: 1 },
+      true,
+      crypto.randomUUID(),
+    ])
+  ).rows[0].r;
+  assert.equal(b.changed, 2);
+  assert(b.entries.every((e) => e.amount === 350000));
+  await deny(
+    teacher,
+    sql,
+    [
+      "2026-08-01",
+      "master_2",
+      500000,
+      { [alice]: 3, [carol]: 0 },
+      true,
+      crypto.randomUUID(),
+    ],
+    /CONFLICT/,
+  );
+  const after = await as(
+    teacher,
+    "select * from public.entries where allowance_month='2026-08-01'",
+  );
+  assert(after.rows.every((e) => e.amount === 350000));
+  await deny(bob, sql, args, /仅老师/);
+  await deny(
+    alice,
+    "select * from private.v21_archive",
+    [],
+    /permission denied/,
   );
 });
 await ok("老师能汇总学生记录", async () => {

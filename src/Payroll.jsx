@@ -7,7 +7,8 @@ import {
   years,
   SALARY_GRADES,
   gradeLabel,
-  salaryFor,
+  gradeKey,
+  BOOK_START,
 } from "./domain.js";
 const Field = ({ label, children }) => (
   <label className="field">
@@ -17,229 +18,290 @@ const Field = ({ label, children }) => (
     })}
   </label>
 );
-
-export default function Payroll({ members, data, run, busy }) {
-  const [owner, setOwner] = useState(members[0]?.id || ""),
+export default function Payroll({ members, data, run, busy, onSaved }) {
+  const [scope, setScope] = useState("person"),
+    [owner, setOwner] = useState(members[0]?.id || ""),
     [month, setMonth] = useState(today().slice(0, 7)),
-    [kind, setKind] = useState("allowance");
-  const [effective, setEffective] = useState(today().slice(0, 7));
-  const [operation, setOperation] = useState(() => crypto.randomUUID());
-  const person = members.find((p) => p.id === owner),
-    column = kind === "salary" ? "salary_month" : "allowance_month";
-  const existing = data.entries.find(
-    (e) => e.owner_id === owner && e[column] === `${month}-01`,
+    [grade, setGrade] = useState("master_1"),
+    [include, setInclude] = useState(false);
+  const [year, setYear] = useState(Number(today().slice(0, 4))),
+    [amount, setAmount] = useState(""),
+    [operation, setOperation] = useState(() => crypto.randomUUID()),
+    [result, setResult] = useState("");
+  const rules = (data.salaryRules || []).filter((r) => r.year),
+    exact = rules.find((r) => r.year === year),
+    rates = exact?.rates || {};
+  const current = (e) =>
+    data.entries.find(
+      (x) => x.owner_id === e.id && x.allowance_month === `${month}-01`,
+    );
+  const eligible = members.filter((p) =>
+    years(p).includes(Number(month.slice(0, 4))),
   );
-  const manual = data.entries.filter(
-    (e) =>
-      !e.deleted &&
-      e.owner_id === owner &&
-      e.kind === kind &&
-      e.date.startsWith(month) &&
-      !e[column],
+  const targets =
+    scope === "person"
+      ? eligible.filter((p) => p.id === owner)
+      : eligible.filter(
+          (p) => gradeKey(p, Number(month.slice(0, 4))) === grade,
+        );
+  const willChange = targets.filter(
+    (p) =>
+      scope === "person" ||
+      include ||
+      !current(p)?.allowance_manual ||
+      current(p)?.deleted,
   );
-  const rules = data.salaryRules || [];
-  const exact = rules.find((r) => r.effective_month === `${effective}-01`);
-  const previous = rules
-    .filter((r) => r.effective_month <= `${effective}-01`)
-    .sort((a, b) => a.effective_month.localeCompare(b.effective_month))
-    .at(-1);
-  const rates =
-    exact?.rates || previous?.rates || data.settings.salary_rates || {};
-  const selectedRule = rules
-    .filter((r) => r.effective_month <= `${month}-01`)
-    .sort((a, b) => a.effective_month.localeCompare(b.effective_month))
-    .at(-1);
-  const change = (setter, value) => {
-    setter(value);
+  const reset = (fn, value) => {
+    fn(value);
     setOperation(crypto.randomUUID());
+    setResult("");
   };
+  const first = targets[0] && current(targets[0]);
   return (
     <>
       <section className="panel settings-panel payroll-panel">
         <div className="panel-heading">
           <div>
-            <h2>按月发放与更正</h2>
-            <p>选择成员和年月，直接填写该月总额。再次保存会替换原金额。</p>
+            <h2>实际月度补助</h2>
+            <p>
+              填实际发放总额，已包含固定工资。可按个人设置，也可按年级统一设置。
+            </p>
           </div>
         </div>
         <div className="form-grid">
-          <Field label="成员">
-            <select
-              value={owner}
-              onChange={(e) => change(setOwner, e.target.value)}
-            >
-              {members.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </Field>
           <Field label="所属年月">
             <input
               type="month"
+              required
+              min={BOOK_START.slice(0, 7)}
+              max="2100-12"
               value={month}
-              min={person ? `${years(person)[0]}-01` : undefined}
-              max={person ? `${years(person).at(-1)}-12` : undefined}
-              onChange={(e) => change(setMonth, e.target.value)}
+              onChange={(e) => reset(setMonth, e.target.value)}
             />
           </Field>
-          <Field label="发放类型">
+          <Field label="设置方式">
             <select
-              value={kind}
-              onChange={(e) => change(setKind, e.target.value)}
+              value={scope}
+              onChange={(e) => reset(setScope, e.target.value)}
             >
-              <option value="allowance">月度补助（每月单独填写）</option>
-              <option value="salary">固定工资（本月单独更正）</option>
+              <option value="person">按个人设置</option>
+              <option value="grade">按年级统一设置</option>
             </select>
           </Field>
+          {scope === "person" ? (
+            <Field label="成员">
+              <select
+                value={owner}
+                onChange={(e) => reset(setOwner, e.target.value)}
+              >
+                {members.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : (
+            <Field label="补助年级">
+              <select
+                value={grade}
+                onChange={(e) => reset(setGrade, e.target.value)}
+              >
+                {SALARY_GRADES.map((k) => (
+                  <option key={k} value={k}>
+                    {gradeLabel(k)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
         </div>
-        {kind === "salary" && person && (
-          <p className="subtle-note">
-            此月年级标准：
-            {money(
-              salaryFor(person, month, {
-                salary_rates: selectedRule?.rates || {},
-              }),
-            )}
-            。本月单独更正后，调整年级标准不会覆盖这笔记录。
-          </p>
-        )}
         <form
-          key={`${owner}-${month}-${kind}-${existing?.version || 0}`}
+          key={`${scope}-${owner}-${month}-${grade}-${first?.version || 0}`}
           onSubmit={(e) => {
             e.preventDefault();
             const f = new FormData(e.currentTarget);
             run(async () => {
               if (
-                !person ||
                 !/^\d{4}-\d{2}$/.test(month) ||
-                !years(person).includes(Number(month.slice(0, 4)))
+                `${month}-01` < BOOK_START ||
+                !targets.length
               )
-                throw new Error("请选择成员在读年度内的月份");
-              await store.action("save_monthly_payment", {
-                p_owner: owner,
-                p_month: `${month}-01`,
-                p_kind: kind,
-                p_amount: cents(f.get("amount")),
-                p_expected_version: existing?.version || 0,
-                p_operation: operation,
-              });
+                throw new Error("请选择 2026 年 6 月起有在读成员的月份");
+              const value = cents(f.get("amount"));
+              if (scope === "person")
+                await store.action("save_monthly_payment", {
+                  p_owner: owner,
+                  p_month: `${month}-01`,
+                  p_kind: "allowance",
+                  p_amount: value,
+                  p_expected_version: first?.version || 0,
+                  p_operation: operation,
+                });
+              else {
+                const r = await store.action("save_grade_allowance", {
+                  p_month: `${month}-01`,
+                  p_grade: grade,
+                  p_amount: value,
+                  p_versions: Object.fromEntries(
+                    targets.map((p) => [p.id, current(p)?.version || 0]),
+                  ),
+                  p_include_individual: include,
+                  p_operation: operation,
+                });
+                setResult(
+                  `已更新 ${r.changed} 人，保留个人金额 ${r.preserved} 人。`,
+                );
+              }
               setOperation(crypto.randomUUID());
-            }, `${month} 月账目已保存，总览与报表已刷新`);
+              onSaved?.(
+                Number(month.slice(0, 4)),
+                Number(month.slice(5, 7)),
+                scope === "person" ? owner : "",
+              );
+            }, `${month} 补助已保存，总览和账单已更新`);
           }}
         >
-          <Field label={`${month} 月总金额 / 元`}>
+          <Field label="实际补助总额 / 元（含固定工资）">
             <input
               name="amount"
               type="number"
+              inputMode="decimal"
               min="0"
               max="100000000"
               step="0.01"
-              inputMode="decimal"
               required
               defaultValue={
-                existing && !existing.deleted ? existing.amount / 100 : ""
+                scope === "person" && first && !first.deleted
+                  ? first.amount / 100
+                  : amount
               }
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setOperation(crypto.randomUUID());
+              }}
             />
           </Field>
           <p className="subtle-note">
-            当前记录：
-            {existing && !existing.deleted
-              ? money(existing.amount)
-              : "尚未填写"}
-            。例如 2,000 改成 4,000，请填 4,000；0 表示该月无发放。
+            例如固定工资 1,000 元，实际补助发 2,000 元，这里填
+            2,000。再次填写会替换该月总额，不会累加。
           </p>
-          {manual.length > 0 && (
-            <div className="notice">
-              该月还有 {manual.length} 笔单独录入的同类款项，共{" "}
-              {money(manual.reduce((n, e) => n + e.amount, 0))}
-              ，也会计入汇总。请先在财务报表核对，避免重复填写。
-            </div>
+          {scope === "grade" && (
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={include}
+                onChange={(e) => reset(setInclude, e.target.checked)}
+              />
+              同时覆盖该年级已单独设置的个人金额
+            </label>
           )}
-          <button className="primary" disabled={busy || !owner}>
-            保存该月金额
+          <div className="allowance-preview">
+            <strong>
+              {month} · 将更新 {willChange.length} 人
+            </strong>
+            {targets.map((p) => (
+              <div key={p.id}>
+                <span>{p.name}</span>
+                <span>
+                  {current(p) && !current(p).deleted
+                    ? money(current(p).amount)
+                    : "尚未填写"}
+                  {scope === "grade" &&
+                  current(p)?.allowance_manual &&
+                  !current(p).deleted &&
+                  !include
+                    ? " · 保留个人金额"
+                    : ""}
+                </span>
+              </div>
+            ))}
+            {!targets.length && <p>该年月没有匹配的在读成员。</p>}
+          </div>
+          <button className="primary" disabled={busy || !willChange.length}>
+            保存补助金额
           </button>
+          {result && (
+            <p role="status" className="positive">
+              {result}
+            </p>
+          )}
         </form>
       </section>
       <section className="panel settings-panel payroll-panel">
         <div className="panel-heading">
           <div>
-            <h2>按年级设置固定工资</h2>
-            <p>每月自动生成“固定工资”，月度补助另行填写。</p>
+            <h2>年度固定工资标准</h2>
+            <p>
+              按年度、年级确定每月金额，该年度内统一执行；在学生账单中列为支出。
+            </p>
           </div>
         </div>
-        <Field label="标准生效年月">
+        <Field label="工资年度">
           <input
-            type="month"
-            min="2000-01"
-            max="2100-12"
+            type="number"
+            min="2026"
+            max="2100"
             required
-            value={effective}
-            onChange={(e) => setEffective(e.target.value)}
+            value={year}
+            onChange={(e) => setYear(Number(e.target.value))}
           />
         </Field>
         <form
-          key={`${effective}-${exact?.version || 0}-${JSON.stringify(rates)}`}
+          key={`${year}-${exact?.version || 0}`}
           onSubmit={(e) => {
             e.preventDefault();
             const f = new FormData(e.currentTarget);
             run(async () => {
-              if (!/^\d{4}-\d{2}$/.test(effective))
-                throw new Error("请选择标准生效月份");
-              const values = Object.fromEntries(
-                SALARY_GRADES.map((k) => [k, cents(f.get(k))]),
-              );
-              await store.action("save_salary_rules", {
-                p_month: `${effective}-01`,
-                p_rates: values,
+              if (!Number.isInteger(year) || year < 2026 || year > 2100)
+                throw new Error("请选择有效年度");
+              await store.action("save_annual_salary", {
+                p_year: year,
+                p_rates: Object.fromEntries(
+                  SALARY_GRADES.map((k) => [k, cents(f.get(k))]),
+                ),
                 p_expected_version: exact?.version || 0,
               });
-            }, "工资标准已保存，适用月份的自动工资已更新");
+              onSaved?.(year, 0, "");
+            }, `${year} 年工资标准已保存，该年度账单已统一更新`);
           }}
         >
           <div className="form-grid">
             {SALARY_GRADES.map((k) => (
-              <Field key={k} label={`${gradeLabel(k)} / 元·月`}>
+              <Field key={k} label={`${gradeLabel(k)}每月固定工资 / 元`}>
                 <input
                   name={k}
                   type="number"
                   inputMode="decimal"
-                  required
                   min="0"
                   max="100000000"
                   step="0.01"
+                  required
                   defaultValue={(rates[k] || 0) / 100}
                 />
               </Field>
             ))}
           </div>
           <div className="notice">
-            按现有自然年度档案，每年 1 月年级加
-            1。生效月以前的工资保持不变；生效月起至下一条标准前的自动工资会重算，老师单独更正过的月份保留。0
-            表示该年级无固定工资。
+            固定工资包含在补助内，不额外增加学生收入或教师发放额。2026 年从 6
+            月记账，此后按各年度标准每月记一笔工资支出。修改年度标准会统一更正该年度已生成的工资，未来月份到月后生成。
           </div>
-          <p className="subtle-note">
-            自动记账从成员记账起始月开始。更早的在读月份可用上方“本月单独更正”补录。旧版已生成的研助补助保留为“月度补助”，不自动改成工资。
-          </p>
           <button className="primary" disabled={busy}>
-            保存工资标准并更新账单
+            保存年度工资标准
           </button>
         </form>
-        {rules.length > 0 && (
+        {!!rules.length && (
           <details className="rate-history">
-            <summary>查看已保存的工资标准（{rules.length} 条）</summary>
+            <summary>查看历年标准</summary>
             {[...rules]
-              .sort((a, b) =>
-                b.effective_month.localeCompare(a.effective_month),
-              )
+              .sort((a, b) => b.year - a.year)
               .map((r) => (
                 <button
-                  key={r.effective_month}
+                  key={r.year}
                   className="text-button"
-                  onClick={() => setEffective(r.effective_month.slice(0, 7))}
+                  onClick={() => setYear(r.year)}
                 >
-                  {r.effective_month.slice(0, 7)} 起 · 查看 / 修改
+                  {r.year} 年 · 查看 / 修改
                 </button>
               ))}
           </details>
